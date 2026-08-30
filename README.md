@@ -180,4 +180,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 **Dev Thakur**
 
 - GitHub: [@DEVTHAKUR-90](https://github.com/DEVTHAKUR-90)
-- Repo: [onedrive-nuke](https://github.com/DEVTHAKUR-90/DDoS_Attack.git)
+- Repo: [DDoS_Attack](https://github.com/DEVTHAKUR-90/DDoS_Attack.git)
