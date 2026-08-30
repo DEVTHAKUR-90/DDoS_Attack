@@ -42,8 +42,8 @@ You are solely responsible for your actions. The authors assume **zero liability
 
 ### Quick install (Linux/macOS)
 ```bash
-git clone https://github.com/DEVTHAKUR-90/DDOS_Attack.git
-cd quantum-bruteforce
+git clone https://github.com/DEVTHAKUR-90/DDoS_Attack.git
+cd DDoS_Attack
 chmod +x setup.sh
 ./setup.sh
 
@@ -68,98 +68,82 @@ python3 quantum_bruteforce.py
 ```bash
 python3 quantum_bruteforce.py --target example.com --port 80 --threads 500 --duration 60
 ```
+---
 
-### Arguments
+**Arguments:**
 
-| Argument     | Description                               |
-| ------------ | ----------------------------------------- |
-| `--target`   | IP address or domain                      |
-| `--port`     | Target port (default: `80`)               |
-| `--threads`  | Number of worker threads (default: `200`) |
-| `--duration` | Test duration in seconds                  |
-| `--type`     | Test mode                                 |
-| `--verbose`  | Show additional runtime information       |
+* `--target` – Target URL, IP address, or domain
+* `--port` – Override the target port
+* `--threads` – Number of worker threads
+* `--duration` – Test duration in seconds
+* `--type` – Test mode
+* `--verbose` – Show additional runtime information
 
 ---
 
-## 🧪 Test Modes
+## 🔥 Test Types (Menu)
 
-| # | Mode                   | Description                            |
-| - | ---------------------- | -------------------------------------- |
-| 1 | **HTTP Testing**       | HTTP request load testing              |
-| 2 | **UDP Testing**        | UDP traffic testing                    |
-| 3 | **TCP Testing**        | TCP connection testing                 |
-| 4 | **Connection Testing** | Connection/resource exhaustion testing |
-| 5 | **DNS Testing**        | DNS query testing                      |
-| 6 | **ICMP Testing**       | ICMP connectivity/load testing         |
-| 7 | **TLS Testing**        | TLS connection testing                 |
-| 8 | **Multi-Mode Testing** | Combines supported test modes          |
+|  # | Test Type                   | Description                                                       |
+| -: | --------------------------- | ----------------------------------------------------------------- |
+|  1 | **HTTP Testing**            | HTTP request testing                                              |
+|  2 | **UDP Testing**             | UDP traffic testing                                               |
+|  3 | **TCP SYN Testing**         | TCP SYN testing; may require elevated privileges                  |
+|  4 | **Slow Connection Testing** | Persistent connection testing                                     |
+|  5 | **DNS Testing**             | DNS query testing                                                 |
+|  6 | **ICMP Testing**            | ICMP traffic testing; may require elevated privileges             |
+|  7 | **TLS Testing**             | TLS connection testing                                            |
+|  8 | **Multi-Vector Testing**    | Combines supported testing modes                                  |
+|  9 | **Advanced L7 Testing**     | Application-layer testing                                         |
+| 10 | **NTP/Memcached Testing**   | Controlled amplification testing in an authorized lab environment |
 
-> **Important:** Only use test modes against systems you own or where you have explicit authorization.
+> **⚠️ Use all testing modes only against systems you own or have explicit written authorization to test.**
 
 ---
 
-## 📊 Monitoring
+## 🛡️ Fallback Mechanism
 
-The application provides runtime information including:
+If a supported test operation fails because of a network error, timeout, or exception, the application can use its fallback mechanism to continue the authorized test while recording the failure in the runtime statistics.
+
+---
+
+## 📊 Monitoring & Control
+
+The application provides:
 
 * Real-time packet/request counters
 * Current activity rate
 * Active thread count
-* Total test duration
-* Runtime errors and failures
-* Test status
+* Test duration
+* Fallback and failure statistics
+* Runtime status
+* `Ctrl+C` support for stopping the test
+* `stop` command in interactive mode
+
+---
+
+## 🛠️ Tools Menu
+
+The tools menu provides utilities for authorized network diagnostics, including:
+
+* **CF-IP Check** – Network/DNS diagnostic utility
+* **Ping** – Check host reachability
+* **HTTP Check** – Check HTTP response status
+* **DNS Lookup** – DNS lookup utility
+* **DSTAT** – System resource monitoring
 
 ---
 
 ## ⚙️ Configuration
 
-Configuration can be accessed through the interactive menu.
+Available configuration options include:
 
-Available settings include:
-
-* Maximum worker threads
+* Maximum threads (`1–5000`)
 * Packet/request size
-* Connection timeout
-* Verbose output
+* Connection timeout (`1–30s`)
+* Proxy configuration where supported
+* Proxy file path where supported
+* Verbose mode
 * Reset to default settings
-
----
-
-## 🛑 Stopping a Test
-
-You can stop a running test by:
-
-* Pressing `Ctrl+C`
-* Using the application's stop command
-
----
-
-## 📝 Example
-
-```text
-Choose option: 1
-Target: example.com
-Port: 80
-Duration: 60
-Threads: 100
-```
-
----
-
-## 🧩 Requirements
-
-* Python 3.6+
-* `colorama`
-* `tqdm`
-* Dependencies listed in `requirements.txt`
-* Appropriate permissions for tests that require elevated privileges
-
-Install dependencies with:
-
-```bash
-pip3 install -r requirements.txt
-```
 
 ---
 
@@ -169,19 +153,21 @@ pip3 install -r requirements.txt
 quantum-bruteforce/
 ├── quantum_bruteforce.py   # Main application
 ├── setup.sh                # Installer
-├── requirements.txt        # Python dependencies
-└── README.md               # Project documentation
+├── requirements.txt        # Dependencies
+├── README.md               # Documentation
+└── LICENSE                 # License terms
 ```
 
 ---
 
 ## ⚠️ Important Notes
 
-* Use this software **only on systems you own or have explicit written authorization to test**.
-* Do not test third-party infrastructure without permission.
-* Elevated privileges may be required for certain network diagnostics.
-* Keep test duration and resource consumption within the limits agreed upon for your test environment.
-* Run experiments in an isolated lab whenever possible.
+* Some network testing modes may require **root/administrator privileges**.
+* Only use proxy functionality with infrastructure you are authorized to use.
+* Always test systems you own or have **explicit written permission** to test.
+* Prefer an isolated laboratory or dedicated test environment for high-volume testing.
+* Keep testing within the agreed scope, duration, and traffic limits.
+* This project is provided for **educational and authorized security-testing purposes only**.
 
 ---
 
@@ -195,4 +181,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 **Dev Thakur**
 
 - GitHub: [@DEVTHAKUR-90](https://github.com/DEVTHAKUR-90)
-- Repo: [onedrive-nuke](https://github.com/DEVTHAKUR-90/DDOS_Attack.git)
+- Repo: [onedrive-nuke](https://github.com/DEVTHAKUR-90/DDoS_Attack.git)
