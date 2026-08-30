@@ -1,0 +1,52 @@
+QUANTUM BRUTEFORCE – STRESS TESTING FRAMEWORK
+==============================================
+
+Copyright (c) 2026 DEV THAKUR
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software only under the following strict conditions:
+
+1. **AUTHORIZED USE ONLY**  
+   The Software may only be used for **authorized security testing** on systems
+   that you own or for which you have explicit **written permission** from the
+   owner. Any other use, including but not limited to:
+   - Unauthorized testing,
+   - Denial‑of‑Service attacks,
+   - Disruption of services,
+   - Unauthorised data access,  
+   is strictly prohibited and may be illegal under local and international laws.
+
+2. **NO LIABILITY**  
+   The Software is provided "AS IS", without warranty of any kind, express or
+   implied, including but not limited to the warranties of merchantability,
+   fitness for a particular purpose, and non‑infringement. In no event shall
+   the authors or copyright holders be liable for any claim, damages, or other
+   liability, whether in an action of contract, tort, or otherwise, arising
+   from, out of, or in connection with the Software or the use or other dealings
+   in the Software.
+
+3. **USER RESPONSIBILITY**  
+   You are solely responsible for your actions when using this Software. You
+   agree to comply with all applicable laws, regulations, and ethical guidelines.
+   You acknowledge that misuse of this Software may result in criminal or civil
+   liability, and you agree to indemnify and hold harmless the authors and
+   copyright holders from any such claims.
+
+4. **NO SUPPORT OR WARRANTY**  
+   The authors do not provide any support, maintenance, or updates for the
+   Software. The Software is provided for educational and testing purposes only.
+
+5. **ATTRIBUTION**  
+   Any public distribution or use of the Software must retain this copyright
+   notice and the disclaimer in all copies or substantial portions of the
+   Software.
+
+6. **TERMINATION**  
+   This license is automatically terminated if you fail to comply with any of
+   the conditions above. Upon termination, you must destroy all copies of the
+   Software in your possession.
+
+---
+
+**BY USING THE SOFTWARE, YOU AGREE TO ALL THE TERMS ABOVE.**
