@@ -1,6 +1,5 @@
 # ⚡ QUANTUM BRUTEFORCE – Ultimate Stress Testing Framework
 <div align="center">
-
 <pre>
 ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗██╗   ██╗███╗   ███╗
 ██╔══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝██║   ██║████╗ ████║
