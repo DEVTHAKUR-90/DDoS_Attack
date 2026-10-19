@@ -1,7 +1,147 @@
 {
-  "threads": 3000,
-  "duration": 0,
-  "payload_sz": 8192,
-  "batch": 2000,
-  "timeout": 2
+  "attack": {
+    "default_threads": 2000,
+    "default_duration": 60,
+    "max_threads": 10000,
+    "min_threads": 10,
+    "max_duration": 3600,
+    "min_duration": 1
+  },
+  "socket": {
+    "send_buffer": 524288,
+    "recv_buffer": 524288,
+    "timeout": 3,
+    "tcp_nodelay": true
+  },
+  "connection_pool": {
+    "enabled": true,
+    "max_pool_size": 100,
+    "ttl": 300
+  },
+  "dns": {
+    "caching_enabled": true,
+    "cache_ttl": 300,
+    "cache_size": 1000
+  },
+  "http": {
+    "keep_alive": true,
+    "pipelining": true,
+    "pipeline_batch": 10,
+    "reconnect_after": 50,
+    "accept_gzip": true,
+    "spoof_forwarded_for": true
+  },
+  "vectors": {
+    "http_v1": {
+      "name": "HTTP Flood v1",
+      "type": "Layer 7",
+      "description": "Standard keep-alive HTTP GET requests",
+      "performance": "high",
+      "payload_size": "variable",
+      "requires_dns": true
+    },
+    "http_v2": {
+      "name": "HTTP Flood v2",
+      "type": "Layer 7",
+      "description": "Pipelined HTTP requests (10 per batch)",
+      "performance": "very_high",
+      "payload_size": "variable",
+      "requires_dns": true
+    },
+    "tcp_flood": {
+      "name": "TCP Flood",
+      "type": "Layer 4",
+      "description": "Rapid TCP connections with payload",
+      "performance": "high",
+      "payload_size": 4096,
+      "requires_dns": true
+    },
+    "udp_v1": {
+      "name": "UDP Flood v1",
+      "type": "Layer 4",
+      "description": "UDP flood on fixed port",
+      "performance": "very_high",
+      "payload_size": 2048,
+      "requires_dns": true
+    },
+    "udp_v2": {
+      "name": "UDP Flood v2",
+      "type": "Layer 4",
+      "description": "UDP flood on random ports, larger payloads",
+      "performance": "very_high",
+      "payload_size": 4096,
+      "requires_dns": true
+    },
+    "slowloris": {
+      "name": "Slowloris",
+      "type": "Layer 7",
+      "description": "Connection exhaustion attack",
+      "performance": "medium",
+      "connections": 50,
+      "requires_dns": true
+    },
+    "icmp": {
+      "name": "ICMP Flood",
+      "type": "Layer 3",
+      "description": "Ping flood (ICMP ECHO REQUEST)",
+      "performance": "medium",
+      "payload_size": 56,
+      "requires_dns": true
+    },
+    "dns": {
+      "name": "DNS Flood",
+      "type": "Application",
+      "description": "DNS query flood on port 53",
+      "performance": "very_high",
+      "port": 53,
+      "requires_dns": true
+    },
+    "syn": {
+      "name": "SYN Flood",
+      "type": "Layer 4",
+      "description": "Raw socket TCP SYN flood (Linux only, requires root)",
+      "performance": "extreme",
+      "requires_root": true,
+      "platform": "Linux",
+      "requires_dns": true
+    },
+    "null": {
+      "name": "NULL Flood",
+      "type": "Layer 4",
+      "description": "NULL flag packets on random ports",
+      "performance": "very_high",
+      "payload_size": "1-2048",
+      "requires_dns": true
+    },
+    "amplification": {
+      "name": "Amplification",
+      "type": "Layer 4",
+      "description": "NTP monlist amplification attack",
+      "performance": "extreme",
+      "amplification_factor": "500-600x",
+      "requires_dns": true
+    },
+    "http_post": {
+      "name": "HTTP POST Flood",
+      "type": "Layer 7",
+      "description": "HTTP POST with large body (8KB)",
+      "performance": "high",
+      "payload_size": 8192,
+      "requires_dns": true
+    }
+  },
+  "performance_tuning": {
+    "thread_pool_enabled": true,
+    "socket_reuse": true,
+    "batch_sends": true,
+    "batch_size": 100,
+    "metrics_interval": 1,
+    "debug_logging": false
+  },
+  "security": {
+    "verify_sends": true,
+    "error_tracking": true,
+    "connection_limits": true,
+    "timeout_handling": true
+  }
 }
